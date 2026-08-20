@@ -1,0 +1,15 @@
+GET /hello/Ada?tag=one&tag=two -> 200 [hello Ada tags 2]
+middleware true
+HEAD /hello/Ada -> 200 [hello Ada tags 0]
+middleware true
+OPTIONS /hello/Ada -> 204 []
+middleware true
+POST /hello/Ada -> 405 [{"status":405,"title":"Method Not Allowed","detail":"No endpoint accepts POST for /hello/Ada","traceId":"espresso-4"}]
+middleware true
+GET /missing -> 404 [{"status":404,"title":"Not Found","detail":"No endpoint matches /missing","traceId":"espresso-5"}]
+middleware true
+POST /json -> 201 [{"name":"Beans"}]
+middleware true
+GET /broken -> 500 [{"status":500,"title":"Internal Server Error","detail":"The request failed. Use the trace id to find the server log.","traceId":"espresso-7"}]
+middleware false
+bad target bad_request

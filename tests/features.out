@@ -1,0 +1,10 @@
+controllers registered 1
+controllers mapped 1
+controller 200 hello Ada
+security true
+validation 400 true
+cors 204 https://beans.test
+openapi 200 true true
+api key missing 401
+api key valid 200
+rate 200 200 429

@@ -1,0 +1,3 @@
+smoke controller 200 smoke Ada
+smoke openapi true
+smoke server true 1

@@ -1,0 +1,112 @@
+# Espresso
+
+Espresso is an OOP web API framework for Beans. Its shape is close to ASP.NET Core: a builder, built-in dependency injection, middleware, routing, controllers, request scopes, configuration, structured logs, validation, security helpers, OpenAPI, and an in-memory test host.
+
+The server is a level-triggered nonblocking HTTP/1.1 loop. It uses `std.poll`, `std.http`, and bounded input and output buffers. The same code builds for macOS, Linux, and Windows.
+
+## Hello API
+
+```beans
+import espresso
+
+fn hello(context: espresso.HttpContext) -> Result<bool> {
+    let name: string = context.request.route("name").or("world")
+    context.response.text(200, "OK", "Hello, {name}!")
+    return ok(true)
+}
+
+fn main() {
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build().expect("app")
+    app.get("/hello/\{name\}", hello).expect("route")
+
+    let server: espresso.WebServer = espresso.WebServer.bind(
+        app, new espresso.ServerOptions()).expect("server")
+    server.run().expect("run")
+}
+```
+
+Run the full example from the Beans repository so the local runtime is found:
+
+```sh
+./build/beansc run ../community-libs/espresso/examples/hello/main.b
+```
+
+## Dependency injection
+
+Register services before `build()`. Constructor parameters are resolved by type.
+
+```beans
+builder.services.add_singleton(type_of(Clock), type_of(SystemClock))?
+builder.services.add_scoped(type_of(Store), type_of(SqlStore))?
+builder.services.add_transient(type_of(Handler), type_of(Handler))?
+```
+
+Espresso checks missing services, cycles, root use of scoped services, and singleton capture of scoped services. It releases scoped and singleton caches in reverse creation order.
+
+## Controllers
+
+Call `espresso.add_controllers(builder)` before build and `espresso.map_controllers(app)` after build. Controller actions are public synchronous methods with this exact shape:
+
+```beans
+@espresso.controller(route: "/api")
+pub class UsersController {
+    store: UserStore
+
+    pub fn init(store: UserStore) { self.store = store }
+
+    @espresso.http_get(route: "/users/\{id\}")
+    pub fn get(context: espresso.HttpContext) -> Result<bool> {
+        // write context.response
+        return ok(true)
+    }
+}
+```
+
+## Production controls
+
+`ServerOptions` bounds connections, parser fields, request bodies, response bodies, pending output, requests per connection, idle time, and graceful shutdown time. The default bind address is loopback. `ServerControl.stop()` wakes the poller and starts graceful shutdown.
+
+Useful middleware:
+
+- `security_headers`
+- `cors(options)`
+- `api_key(header, secret)`
+- `fixed_window_rate_limit(limit, window_ms, max_clients = 65536)`
+- `request_logging(logger)`
+
+Errors use `application/problem+json`. Production mode hides internal error text and includes a trace id.
+
+## JSON and validation
+
+Use `espresso.body_json` and `espresso.write_json` for the JSON DOM. For typed structs, call Beans `json.decode_bytes` and `json.encode`, then pass encoded text to `espresso.write_json_text`.
+
+`ValidationErrors` supplies required, byte-length, and integer-range checks. `write_validation_problem` returns a structured 400 response.
+
+## OpenAPI and tests
+
+```beans
+espresso.map_openapi(app)?
+let host: espresso.TestHost = new espresso.TestHost(app)
+let response: espresso.TestResponse = host.get("/hello/Beans")?
+```
+
+Run the fast suite:
+
+```sh
+bash ../community-libs/espresso/test.sh
+```
+
+Add `--native` for interpreter/native parity. The suite also checks Linux, Windows, and macOS targets.
+
+Run the router benchmark as native code:
+
+```sh
+./build/beansc build ../community-libs/espresso/examples/router_bench/main.b -o /tmp/espresso-router-bench
+/tmp/espresso-router-bench
+```
+
+## Current boundary
+
+Espresso is ready for HTTP APIs, but Beans does not yet have first-class async closures. Endpoint and middleware function values are therefore synchronous and must not do long blocking work on the event-loop thread. Put blocking work behind a worker service or a separate process. TLS and HTTP/2 termination should currently sit in a reverse proxy; the Beans standard library can still be used directly when an app needs lower-level TLS, HTTP/2, or WebSocket handling.
