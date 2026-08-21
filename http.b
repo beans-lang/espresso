@@ -45,18 +45,31 @@ fn hex_value(byte: int) -> int {
 }
 
 fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
-    let source: Bytes = Bytes.from(text)
+    var needs_decode: bool = false
+    var checked: int = 0
+    for checked < text.len() {
+        let byte: int = text.byte_at(checked)
+        if byte == 37 || (plus_as_space && byte == 43) {
+            needs_decode = true
+        }
+        if byte == 0 || byte < 32 || byte == 127 {
+            return err("request target contains a control byte", "bad_request")
+        }
+        checked += 1
+    }
+    if !needs_decode { return ok(text) }
+
     let target: Bytes = new Bytes(0)
-    target.reserve(source.len())
+    target.reserve(text.len())
     var index: int = 0
-    for index < source.len() {
-        let byte: int = source.get(index)
+    for index < text.len() {
+        let byte: int = text.byte_at(index)
         if byte == 37 {
-            if index + 2 >= source.len() {
+            if index + 2 >= text.len() {
                 return err("incomplete percent escape in request target", "bad_request")
             }
-            let high: int = hex_value(source.get(index + 1))
-            let low: int = hex_value(source.get(index + 2))
+            let high: int = hex_value(text.byte_at(index + 1))
+            let low: int = hex_value(text.byte_at(index + 2))
             if high < 0 || low < 0 {
                 return err("invalid percent escape in request target", "bad_request")
             }
@@ -67,9 +80,6 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
             target.push(decoded)
             index += 3
         } else {
-            if byte == 0 || byte < 32 || byte == 127 {
-                return err("request target contains a control byte", "bad_request")
-            }
             if plus_as_space && byte == 43 {
                 target.push(32)
             } else {
@@ -105,21 +115,23 @@ fn request_path(target: string) -> Result<List<string>> {
     if target == "" || !target.starts_with("/") {
         return err("the request target must use origin form", "bad_request")
     }
-    var raw_path: string = target
-    match target.find("?") {
-        some(at) => { raw_path = target.slice(0, at) }
-        none => {}
-    }
+    let path_end: int = target.find("?").or(target.len())
+    let raw_path: string = target.slice(0, path_end)
     if raw_path.find("#").is_some() {
         return err("a request target cannot contain a fragment", "bad_request")
     }
     var segments: List<string> = []
-    let pieces: List<string> = raw_path.split("/")
-    for index: int in 1..pieces.len() {
+    var start: int = 1
+    for start <= raw_path.len() {
+        var end: int = raw_path.find_byte(47, start)
+        if end < 0 { end = raw_path.len() }
         // A trailing slash is normalized away. Empty segments in the middle
         // remain visible, so `/a//b` does not silently become `/a/b`.
-        if index == pieces.len() - 1 && pieces[index] == "" { continue }
-        segments.push(decode_url_component(pieces[index], false)?)
+        if start == raw_path.len() { break }
+        segments.push(decode_url_component(
+            raw_path.slice(start, end), false)?)
+        if end == raw_path.len() { break }
+        start = end + 1
     }
     return ok(move segments)
 }
@@ -130,7 +142,7 @@ fn join_path(segments: List<string>) -> string {
 }
 
 /// One request as Espresso presents it to middleware and endpoints.
-pub class HttpRequest {
+pub unique class HttpRequest {
     pub method: string
     pub target: string
     pub path: string
@@ -179,7 +191,7 @@ pub class HttpRequest {
 }
 
 /// A buffered HTTP response. The server owns Content-Length and Connection.
-pub class HttpResponse {
+pub unique class HttpResponse {
     pub status: int = 200
     pub reason: string = "OK"
     pub headers: http.Headers = new http.Headers()
@@ -225,16 +237,16 @@ pub class HttpContext {
     pub trace_id: string
     pub head_only: bool = false
 
-    pub fn init(request: HttpRequest,
+    pub fn init(move request: HttpRequest,
                 services: ServiceProvider,
                 trace_id: string) {
-        self.request = request
+        self.request = move request
         self.services = services
         self.trace_id = trace_id
     }
 
     pub fn close() -> Result<bool> {
-        return self.services.close()
+        return self.services.close_scope()
     }
 }
 

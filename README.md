@@ -107,6 +107,15 @@ Run the router benchmark as native code:
 /tmp/espresso-router-bench
 ```
 
+Run the HTTP JSON benchmark against Bun with `wrk`:
+
+```sh
+../community-libs/espresso/examples/json_bench/run.sh
+```
+
+Both servers match `GET /json`, create and serialize the same typed JSON
+shape for every request, and return the same response body and content type.
+
 ## Current boundary
 
 Espresso is ready for HTTP APIs, but Beans does not yet have first-class async closures. Endpoint and middleware function values are therefore synchronous and must not do long blocking work on the event-loop thread. Put blocking work behind a worker service or a separate process. TLS and HTTP/2 termination should currently sit in a reverse proxy; the Beans standard library can still be used directly when an app needs lower-level TLS, HTTP/2, or WebSocket handling.

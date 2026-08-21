@@ -1,11 +1,5 @@
 package espresso
 
-class RouteMatch {
-    matched: bool = false
-    values: Map<string, string> = {}
-    score: int = 0
-}
-
 class Route {
     method: string
     pattern: string
@@ -46,8 +40,26 @@ class Route {
         return true
     }
 
-    fn path_match(request: HttpRequest) -> RouteMatch {
-        let result: RouteMatch = new RouteMatch()
+    fn path_matches(request: HttpRequest) -> bool {
+        var request_index: int = 0
+        for route_index: int in 0..self.kinds.len() {
+            let kind: int = self.kinds[route_index]
+            if kind == 2 {
+                return true
+            }
+            if request_index >= request.segments.len() { return false }
+            if kind == 0 {
+                if self.segments[route_index] !=
+                       request.segments[request_index] {
+                    return false
+                }
+            }
+            request_index += 1
+        }
+        return request_index == request.segments.len()
+    }
+
+    fn capture_values(request: HttpRequest) {
         var request_index: int = 0
         for route_index: int in 0..self.kinds.len() {
             let kind: int = self.kinds[route_index]
@@ -56,26 +68,15 @@ class Route {
                 for index: int in request_index..request.segments.len() {
                     rest.push(request.segments[index])
                 }
-                result.values[self.names[route_index]] = rest.join("/")
-                request_index = request.segments.len()
-                break
+                request.route_values[self.names[route_index]] = rest.join("/")
+                return
             }
-            if request_index >= request.segments.len() { return result }
-            if kind == 0 {
-                if self.segments[route_index] !=
-                       request.segments[request_index] {
-                    return result
-                }
-            } else {
-                result.values[self.names[route_index]] =
+            if kind == 1 {
+                request.route_values[self.names[route_index]] =
                     request.segments[request_index]
             }
             request_index += 1
         }
-        if request_index != request.segments.len() { return result }
-        result.matched = true
-        result.score = self.score
-        return result
     }
 }
 
@@ -192,26 +193,20 @@ pub class Router {
     }
 
     fn dispatch(context: HttpContext) -> Result<bool> {
-        let requested: string = context.request.method.to_upper()
+        let requested: string = context.request.method
         var best_score: int = -1
-        var selected: Option<fn(HttpContext) -> Result<bool>> = none
-        var selected_values: Map<string, string> = {}
+        var selected: Option<Route> = none
         var allowed: List<string> = []
 
         for route: Route in self.routes {
-            let matched: RouteMatch = route.path_match(context.request)
-            if !matched.matched { continue }
+            if !route.path_matches(context.request) { continue }
             self.add_allowed(allowed, route.method)
             let method_matches: bool =
                 route.method == requested ||
                 (requested == "HEAD" && route.method == "GET")
-            if method_matches && matched.score > best_score {
-                best_score = matched.score
-                selected = some(route.handler)
-                selected_values.clear()
-                for key: string in matched.values.keys() {
-                    selected_values[key] = matched.values[key]
-                }
+            if method_matches && route.score > best_score {
+                best_score = route.score
+                selected = some(route)
             }
         }
 
@@ -224,10 +219,10 @@ pub class Router {
         }
 
         match selected {
-            some(handler) => {
-                context.request.route_values = move selected_values
+            some(route) => {
+                route.capture_values(context.request)
                 context.head_only = requested == "HEAD"
-                return handler(context)
+                return route.handler(context)
             }
             none => {}
         }

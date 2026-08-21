@@ -109,9 +109,11 @@ pub class WebApplication {
                   remote: net.Address) -> Result<HttpContext> {
         if self.closed { return err("the application is closed", "closed") }
         let request: HttpRequest = HttpRequest.from_served(served, remote)?
-        let scope: ServiceProvider = self.services.create_scope()?
+        let scope: ServiceProvider = if self.services.has_registrations() {
+            self.services.create_scope()?
+        } else { self.services }
         let context: HttpContext = new HttpContext(
-            request, scope, self.next_trace_id())
+            move request, scope, self.next_trace_id())
         match self.run_pipeline(context, 0) {
             ok(_) => {}
             err(problem) => {

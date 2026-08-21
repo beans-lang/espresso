@@ -155,6 +155,15 @@ pub class ServiceProvider {
             self.registry, self.singletons, false, self.validate_scopes))
     }
 
+    fn has_registrations() -> bool {
+        return self.registry.descriptors.len() != 0
+    }
+
+    fn close_scope() -> Result<bool> {
+        if self.root { return ok(true) }
+        return self.close()
+    }
+
     fn resolving_contains(name: string) -> bool {
         for active: string in self.resolving {
             if active == name { return true }

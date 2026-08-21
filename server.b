@@ -19,7 +19,7 @@ pub class ServerOptions {
     pub max_body_bytes: int = 8388608
     pub max_response_body_bytes: int = 16777216
     pub max_pending_output_bytes: int = 33554432
-    pub max_requests_per_connection: int = 1000
+    pub max_requests_per_connection: int = 1000000
     pub max_header_count: int = 128
     pub max_header_bytes: int = 65536
     pub max_target_bytes: int = 8192
@@ -86,6 +86,8 @@ unique class ServerConnection {
     output_offset: int = 0
     close_after_write: bool = false
     read_paused: bool = false
+    watching_read: bool = true
+    watching_write: bool = false
     requests: int = 0
     last_active_nanos: int
     max_body: int
@@ -120,6 +122,17 @@ unique class ServerConnection {
         let read: bool = !self.close_after_write && !self.read_paused
         let write: bool = self.has_output()
         return new poll.Interest(read, write)
+    }
+
+    fn interest_changed() -> bool {
+        let read: bool = !self.close_after_write && !self.read_paused
+        let write: bool = self.has_output()
+        return read != self.watching_read || write != self.watching_write
+    }
+
+    fn remember_interest() {
+        self.watching_read = !self.close_after_write && !self.read_paused
+        self.watching_write = self.has_output()
     }
 
     fn compact_output() {
@@ -418,8 +431,24 @@ pub unique class WebServer {
         let ignored_close: Result<bool> = connection.close()
     }
 
+    fn drop_connection_at(connections: List<ServerConnection>,
+                          tokens: List<int>,
+                          token_indexes: Map<int, int>,
+                          index: int) {
+        let token: int = tokens.remove(index)
+        let connection: ServerConnection = connections.remove(index)
+        let removed: bool = token_indexes.remove(token)
+        var shifted: int = index
+        for shifted < tokens.len() {
+            token_indexes[tokens[shifted]] = shifted
+            shifted += 1
+        }
+        self.drop_connection(move connection)
+    }
+
     fn accept_ready(connections: List<ServerConnection>,
                     tokens: List<int>,
+                    token_indexes: Map<int, int>,
                     stats: ServerStats) -> Result<bool> {
         for {
             let pending: Option<net.TcpStream> = self.listener.try_accept()?
@@ -439,6 +468,7 @@ pub unique class WebServer {
             connections.push(new ServerConnection(
                 move stream, peer, self.options))
             tokens.push(token)
+            token_indexes[token] = connections.len() - 1
             stats.accepted += 1
             if connections.len() > stats.active_peak {
                 stats.active_peak = connections.len()
@@ -470,9 +500,15 @@ pub unique class WebServer {
         }
         var connections: List<ServerConnection> = []
         var tokens: List<int> = []
+        var token_indexes: Map<int, int> = {}
         let stats: ServerStats = new ServerStats()
         var draining: bool = false
         var deadline: int = 0
+        let idle_sweep_ms: int = if self.options.idle_timeout_ms < 1000 {
+            self.options.idle_timeout_ms
+        } else { 1000 }
+        var next_idle_sweep: int = time.monotonic_nanos() +
+            idle_sweep_ms * 1000000
 
         for {
             if self.stopping.load(MemoryOrder.acquire) && !draining {
@@ -480,6 +516,7 @@ pub unique class WebServer {
                 deadline = time.monotonic_nanos() +
                     self.options.graceful_shutdown_ms * 1000000
                 self.stop_accepting()
+                token_indexes.clear()
                 let count: int = connections.len()
                 for index: int in 0..count {
                     let connection: ServerConnection = connections.remove(0)
@@ -488,6 +525,7 @@ pub unique class WebServer {
                         self.watch.modify(
                             connection.handle(), token,
                             poll.Interest.write_only())?
+                        token_indexes[token] = connections.len()
                         connections.push(move connection)
                         tokens.push(token)
                     } else {
@@ -502,6 +540,7 @@ pub unique class WebServer {
                     tokens.remove(0)
                     self.drop_connection(move connection)
                 }
+                token_indexes.clear()
                 break
             }
 
@@ -511,18 +550,16 @@ pub unique class WebServer {
             for event: poll.Event in events {
                 if event.token == 0 {
                     if !draining {
-                        self.accept_ready(connections, tokens, stats)?
+                        self.accept_ready(
+                            connections, tokens, token_indexes, stats)?
                     }
                     continue
                 }
-                match tokens.index_of(event.token) {
+                match token_indexes.get(event.token) {
                     none => {}
                     some(index) => {
-                        let connection: ServerConnection =
-                            connections.remove(index)
-                        tokens.remove(index)
                         var keep: bool = false
-                        match connection.process(
+                        match connections[index].process(
                                 event, self.app, self.options, stats) {
                             ok(active) => { keep = active }
                             err(problem) => {
@@ -530,29 +567,33 @@ pub unique class WebServer {
                             }
                         }
                         if keep {
-                            self.watch.modify(
-                                connection.handle(), event.token,
-                                connection.interest())?
-                            connections.push(move connection)
-                            tokens.push(event.token)
+                            if connections[index].interest_changed() {
+                                self.watch.modify(
+                                    connections[index].handle(), event.token,
+                                    connections[index].interest())?
+                                connections[index].remember_interest()
+                            }
                         } else {
-                            self.drop_connection(move connection)
+                            self.drop_connection_at(
+                                connections, tokens, token_indexes, index)
                         }
                     }
                 }
             }
 
             let now: int = time.monotonic_nanos()
-            let count: int = connections.len()
-            for index: int in 0..count {
-                let connection: ServerConnection = connections.remove(0)
-                let token: int = tokens.remove(0)
-                if connection.idle(now, self.options.idle_timeout_ms) {
-                    self.drop_connection(move connection)
-                } else {
-                    connections.push(move connection)
-                    tokens.push(token)
+            if !draining && now >= next_idle_sweep {
+                var index: int = 0
+                for index < connections.len() {
+                    if connections[index].idle(
+                            now, self.options.idle_timeout_ms) {
+                        self.drop_connection_at(
+                            connections, tokens, token_indexes, index)
+                    } else {
+                        index += 1
+                    }
                 }
+                next_idle_sweep = now + idle_sweep_ms * 1000000
             }
         }
         self.close_resources()
