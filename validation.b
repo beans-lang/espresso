@@ -62,7 +62,7 @@ pub fn write_validation_problem(context: HttpContext,
     let problem: json.Value = json.Value.object()
     problem.add("status", json.Value.from_int(400))?
     problem.add("title", json.Value.from_string("Validation Failed"))?
-    problem.add("traceId", json.Value.from_string(context.trace_id))?
+    problem.add("traceId", json.Value.from_string(context.trace_id()))?
     let items: json.Value = json.Value.array()
     for index: int in 0..errors.count() {
         let error: ValidationError = errors.at(index)

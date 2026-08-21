@@ -33,6 +33,39 @@ Run the full example from the Beans repository so the local runtime is found:
 ./build/beansc run ../community-libs/espresso/examples/hello/main.b
 ```
 
+## Workers
+
+`espresso.serve` takes one application factory per worker and blocks until
+they return. One factory serves from the calling thread. With more, the
+calling thread accepts connections and deals them round-robin to the
+workers, and each worker runs its own event loop, application, and service
+provider. Workers share nothing.
+
+```beans
+fn build_app() -> Result<espresso.WebApplication> {
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build()?
+    app.get("/json", json_message)?
+    return ok(app)
+}
+
+fn main() {
+    var factories: List<send fn() -> Result<espresso.WebApplication>> = []
+    for index: int in 0..4 {
+        factories.push(build_app)
+    }
+    espresso.serve(new espresso.ServerOptions(), move factories)
+        .expect("serve")
+}
+```
+
+A handler's request objects are reused for the next request on the same
+connection, so copy anything that must outlive the handler. `request.path`
+is the raw undecoded path; `decoded_path()` returns the decoded form.
+`request.query()` parses the query string the first time it is called, and
+`context.trace_id()` builds its id the same way.
+
 ## Dependency injection
 
 Register services before `build()`. Constructor parameters are resolved by type.

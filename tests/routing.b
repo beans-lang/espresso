@@ -16,7 +16,7 @@ fn middleware(context: espresso.HttpContext,
 
 fn hello(context: espresso.HttpContext) -> Result<bool> {
     let name: string = context.request.route("name").or("missing")
-    let tag_count: int = context.request.query.all("tag").len()
+    let tag_count: int = context.request.query()?.all("tag").len()
     context.response.text(200, "OK", "hello {name} tags {tag_count}")
     return ok(true)
 }
@@ -72,7 +72,7 @@ fn main() {
     match app.handle(
         served("GET", "/bad%2"),
         new net.Address("127.0.0.1", 1234)) {
-        ok(context) => io.println("bad target accepted"),
+        ok(context) => io.println("bad target status {context.response.status}"),
         err(error) => io.println("bad target {error.kind}"),
     }
     app.close().expect("close app")

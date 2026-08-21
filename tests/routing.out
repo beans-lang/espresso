@@ -12,4 +12,4 @@ POST /json -> 201 [{"name":"Beans"}]
 middleware true
 GET /broken -> 500 [{"status":500,"title":"Internal Server Error","detail":"The request failed. Use the trace id to find the server log.","traceId":"espresso-7"}]
 middleware false
-bad target bad_request
+bad target status 400

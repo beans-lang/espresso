@@ -31,7 +31,10 @@ fn main() {
     for target: string in invalid {
         match app.handle(
                 request(target), new net.Address("127.0.0.1", 1)) {
-            ok(context) => { context.close().expect("close") }
+            ok(context) => {
+                if context.response.status != 200 { refused += 1 }
+                context.close().expect("close")
+            }
             err(_) => { refused += 1 }
         }
     }

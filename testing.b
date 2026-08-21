@@ -17,7 +17,7 @@ pub class TestResponse {
         self.headers = context.response.headers
         self.body = context.response.body.slice(
             0, context.response.body.len())
-        self.trace_id = context.trace_id
+        self.trace_id = context.trace_id()
     }
 
     pub fn text() -> string { return self.body.to_string() }

@@ -128,7 +128,7 @@ pub fn request_logging(logger: Logger) ->
             if result.is_ok() { LogLevel.info } else { LogLevel.error },
             "http.request",
             "{context.request.method} {context.request.path}",
-            context.trace_id)
+            context.trace_id())
         record.field("status", "{context.response.status}")
         record.field("durationNanos", "{elapsed}")
         logger.write(record)

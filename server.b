@@ -3,6 +3,7 @@ package espresso
 import std.http
 import std.net
 import std.poll
+import std.thread
 import std.time
 
 /// Bounds for the listener, parser, connections, bodies, and output queues.
@@ -12,7 +13,11 @@ pub class ServerOptions {
     pub backlog: int = 512
     pub max_connections: int = 10000
     pub max_events: int = 256
-    pub poll_timeout_ms: int = 1000
+    // Short on purpose: a busy loop never reaches the timeout, and a parked
+    // loop that wakes 40 times a second keeps the process out of the
+    // platform's idle heuristics — macOS delays kevent wakeups by up to the
+    // full timeout when most of a process's threads sit in long waits.
+    pub poll_timeout_ms: int = 25
     pub idle_timeout_ms: int = 30000
     pub graceful_shutdown_ms: int = 10000
     pub read_buffer_bytes: int = 65536
@@ -78,8 +83,9 @@ unique class ServerConnection {
     stream: net.TcpStream
     peer: net.Address
     parser: http.RequestParser
-    building: http.ServedRequest = new http.ServedRequest()
+    context: Option<HttpContext> = none
     have_head: bool = false
+    events: List<http.RequestEvent> = []
     read_buffer: Bytes
     output: Bytes = new Bytes(0)
     response_buffer: Bytes = new Bytes(0)
@@ -210,76 +216,108 @@ unique class ServerConnection {
     }
 
     fn dispatch(app: WebApplication,
-                request: http.ServedRequest,
+                keep_alive: bool,
                 options: ServerOptions,
                 stats: ServerStats) -> Result<bool> {
         self.requests += 1
         stats.requests += 1
-        if self.requests >= options.max_requests_per_connection {
-            request.keep_alive = false
-        }
-        match app.handle(request, self.peer) {
-            ok(context) => {
-                let queued: Result<bool> = self.append_response(
-                    context.response.status,
-                    context.response.reason,
-                    context.response.headers,
-                    context.response.body,
-                    request.keep_alive,
-                    context.head_only,
-                    options)
-                let closed: Result<bool> = context.close()
-                queued?
-                closed?
-                stats.responses += 1
+        match self.context {
+            some(active) => {
+                active.request.keep_alive = keep_alive
+                if self.requests >= options.max_requests_per_connection {
+                    active.request.keep_alive = false
+                }
+                match app.handle_context(active) {
+                    ok(_) => {
+                        let queued: Result<bool> = self.append_response(
+                            active.response.status,
+                            active.response.reason,
+                            active.response.headers,
+                            active.response.body,
+                            active.request.keep_alive,
+                            active.head_only,
+                            options)
+                        let closed: Result<bool> = active.close()
+                        queued?
+                        closed?
+                        stats.responses += 1
+                    }
+                    err(problem) => {
+                        let ignored: Result<bool> = active.close()
+                        let status: int = if problem.kind == "bad_request" {
+                            400
+                        } else { 500 }
+                        let reason: string = if status == 400 {
+                            "Bad Request"
+                        } else { "Internal Server Error" }
+                        self.append_error(
+                            status, reason, problem.msg, false, options)?
+                        stats.responses += 1
+                    }
+                }
             }
-            err(problem) => {
-                let status: int = if problem.kind == "bad_request" {
-                    400
-                } else { 500 }
-                let reason: string = if status == 400 {
-                    "Bad Request"
-                } else { "Internal Server Error" }
-                self.append_error(
-                    status, reason, problem.msg, false, options)?
-                stats.responses += 1
+            none => {
+                return err("request completed without a context", "state")
             }
         }
         return ok(true)
     }
 
     fn absorb(app: WebApplication,
-              events: List<http.RequestEvent>,
               options: ServerOptions,
               stats: ServerStats) -> Result<bool> {
-        for event: http.RequestEvent in events {
-            match event {
+        for position: int in 0..self.events.len() {
+            match self.events[position] {
                 head(request) => {
-                    self.building = new http.ServedRequest()
-                    self.building.head = request
-                    self.building.keep_alive = request.keep_alive
+                    if self.context.is_none() {
+                        self.context = some(app.new_context(self.peer))
+                    }
                     self.have_head = true
+                    match self.context {
+                        some(active) => {
+                            match app.begin_request(active, request) {
+                                ok(_) => {}
+                                err(problem) => {
+                                    self.append_error(
+                                        400, "Bad Request", problem.msg,
+                                        false, options)?
+                                    self.close_after_write = true
+                                    return ok(false)
+                                }
+                            }
+                        }
+                        none => {}
+                    }
                 }
                 body(piece) => {
-                    if self.building.body.len() + piece.len() > self.max_body {
-                        self.append_error(
-                            413, "Content Too Large",
-                            "request body exceeds the configured limit",
-                            false, options)?
-                        self.close_after_write = true
-                        return ok(false)
+                    match self.context {
+                        some(active) => {
+                            let grown: int =
+                                active.request.body.len() + piece.len()
+                            if grown > self.max_body {
+                                self.append_error(
+                                    413, "Content Too Large",
+                                    "request body exceeds the configured limit",
+                                    false, options)?
+                                self.close_after_write = true
+                                return ok(false)
+                            }
+                            active.request.body.append(piece)
+                        }
+                        none => {}
                     }
-                    self.building.body.append(piece)
                 }
                 trailers(fields) => {
-                    self.building.trailer_fields = fields
+                    match self.context {
+                        some(active) => {
+                            active.request.trailer_fields = fields
+                        }
+                        none => {}
+                    }
                 }
                 done(keep_alive) => {
-                    self.building.keep_alive = keep_alive
-                    let ready: http.ServedRequest = self.building
-                    self.building = new http.ServedRequest()
                     self.have_head = false
-                    self.dispatch(app, ready, options, stats)?
+                    self.dispatch(app, keep_alive, options, stats)?
                 }
                 upgraded(request, remainder) => {
                     self.append_error(
@@ -293,19 +331,21 @@ unique class ServerConnection {
         return ok(true)
     }
 
-    fn read_ready(app: WebApplication,
+    fn read_ready(now: int,
+                  app: WebApplication,
                   options: ServerOptions,
                   stats: ServerStats) -> Result<bool> {
         for !self.close_after_write && !self.read_paused {
             match self.stream.try_read_into(self.read_buffer)? {
                 none => { return ok(true) }
                 some(count) => {
-                    self.last_active_nanos = time.monotonic_nanos()
+                    self.last_active_nanos = now
                     if count == 0 {
                         self.close_after_write = true
-                        match self.parser.finish() {
-                            ok(events) => {
-                                self.absorb(app, events, options, stats)?
+                        self.events.clear()
+                        match self.parser.finish_into(self.events) {
+                            ok(_) => {
+                                self.absorb(app, options, stats)?
                             }
                             err(problem) => {
                                 if self.have_head {
@@ -317,10 +357,11 @@ unique class ServerConnection {
                         }
                         return ok(true)
                     }
-                    match self.parser.feed_range(
-                            self.read_buffer, 0, count) {
-                        ok(events) => {
-                            self.absorb(app, events, options, stats)?
+                    self.events.clear()
+                    match self.parser.feed_range_into(
+                            self.read_buffer, 0, count, self.events) {
+                        ok(_) => {
+                            self.absorb(app, options, stats)?
                         }
                         err(problem) => {
                             self.append_error(
@@ -339,7 +380,7 @@ unique class ServerConnection {
         return ok(true)
     }
 
-    fn write_ready() -> Result<bool> {
+    fn write_ready(now: int) -> Result<bool> {
         for self.has_output() {
             match self.stream.try_write_from(
                     self.output, self.output_offset)? {
@@ -349,7 +390,7 @@ unique class ServerConnection {
                         return err("the connection accepted no output", "reset")
                     }
                     self.output_offset += count
-                    self.last_active_nanos = time.monotonic_nanos()
+                    self.last_active_nanos = now
                 }
             }
         }
@@ -361,14 +402,15 @@ unique class ServerConnection {
     }
 
     fn process(event: poll.Event,
+               now: int,
                app: WebApplication,
                options: ServerOptions,
                stats: ServerStats) -> Result<bool> {
         if event.readable && !self.close_after_write {
-            self.read_ready(app, options, stats)?
+            self.read_ready(now, app, options, stats)?
         }
         if event.writable || self.has_output() {
-            if !self.write_ready()? { return ok(false) }
+            if !self.write_ready(now)? { return ok(false) }
         }
         if event.error { return ok(false) }
         if event.hangup && !self.has_output() { return ok(false) }
@@ -391,6 +433,7 @@ pub unique class WebServer {
     listener: net.TcpListener
     watch: poll.Poller
     stopping: Atomic<bool> = new Atomic<bool>(false)
+    intake: Option<Mutex<List<net.TcpStream>>> = none
     next_token: int = 1
     listener_live: bool = true
     resources_live: bool = true
@@ -410,6 +453,15 @@ pub unique class WebServer {
         options.validate()?
         let listener: net.TcpListener = net.TcpListener.bind_with_backlog(
             options.host, options.port, options.backlog)?
+        return WebServer.adopt(app, options, move listener)
+    }
+
+    /// Wraps an already-bound listener — the road `serve` takes to give
+    /// every worker its own SO_REUSEPORT accept loop.
+    pub static fn adopt(app: WebApplication,
+                        options: ServerOptions,
+                        move listener: net.TcpListener) -> Result<WebServer> {
+        options.validate()?
         listener.set_nonblocking(true)?
         let watch: poll.Poller = poll.Poller.open()?
         watch.add(listener.poll_handle(), 0, poll.Interest.read_only())?
@@ -423,6 +475,13 @@ pub unique class WebServer {
             stopping: self.stopping,
             signal: self.watch.wake_handle(),
         }
+    }
+
+    /// Accepts connections handed over by an acceptor thread. The acceptor
+    /// pushes streams under the lock and then pokes `control().signal`
+    /// through `poll.wake`; this loop drains the queue on every wakeup.
+    pub fn set_intake(queue: Mutex<List<net.TcpStream>>) {
+        self.intake = some(queue)
     }
 
     fn drop_connection(move connection: ServerConnection) {
@@ -446,6 +505,58 @@ pub unique class WebServer {
         self.drop_connection(move connection)
     }
 
+    // Takes ownership of one connected stream. A failure here is the
+    // stream's problem, never the server's: the stream is closed, counted,
+    // and the loop carries on.
+    fn admit(move stream: net.TcpStream,
+             connections: List<ServerConnection>,
+             tokens: List<int>,
+             token_indexes: Map<int, int>,
+             stats: ServerStats) {
+        if connections.len() >= self.options.max_connections {
+            stats.rejected += 1
+            let ignored: Result<bool> = stream.close()
+            return
+        }
+        var ready: bool = true
+        match stream.set_nonblocking(true) {
+            ok(_) => {}
+            err(_) => { ready = false }
+        }
+        let ignored_nodelay: Result<bool> = stream.set_nodelay(true)
+        var peer: net.Address = new net.Address("", 0)
+        if ready {
+            match stream.peer_address() {
+                ok(address) => { peer = address }
+                err(_) => { ready = false }
+            }
+        }
+        if !ready {
+            stats.connection_errors += 1
+            let ignored: Result<bool> = stream.close()
+            return
+        }
+        let token: int = self.next_token
+        self.next_token += 1
+        match self.watch.add(
+                stream.poll_handle(), token, poll.Interest.read_only()) {
+            ok(_) => {}
+            err(_) => {
+                stats.connection_errors += 1
+                let ignored: Result<bool> = stream.close()
+                return
+            }
+        }
+        connections.push(new ServerConnection(
+            move stream, peer, self.options))
+        tokens.push(token)
+        token_indexes[token] = connections.len() - 1
+        stats.accepted += 1
+        if connections.len() > stats.active_peak {
+            stats.active_peak = connections.len()
+        }
+    }
+
     fn accept_ready(connections: List<ServerConnection>,
                     tokens: List<int>,
                     token_indexes: Map<int, int>,
@@ -453,28 +564,35 @@ pub unique class WebServer {
         for {
             let pending: Option<net.TcpStream> = self.listener.try_accept()?
             if pending.is_none() { break }
-            let stream: net.TcpStream = (move pending).expect("accepted stream")
-            if connections.len() >= self.options.max_connections {
-                stats.rejected += 1
-                let ignored: Result<bool> = stream.close()
-                continue
-            }
-            stream.set_nonblocking(true)?
-            let peer: net.Address = stream.peer_address()?
-            let token: int = self.next_token
-            self.next_token += 1
-            self.watch.add(
-                stream.poll_handle(), token, poll.Interest.read_only())?
-            connections.push(new ServerConnection(
-                move stream, peer, self.options))
-            tokens.push(token)
-            token_indexes[token] = connections.len() - 1
-            stats.accepted += 1
-            if connections.len() > stats.active_peak {
-                stats.active_peak = connections.len()
-            }
+            self.admit((move pending).expect("accepted stream"),
+                       connections, tokens, token_indexes, stats)
         }
         return ok(true)
+    }
+
+    fn drain_intake(connections: List<ServerConnection>,
+                    tokens: List<int>,
+                    token_indexes: Map<int, int>,
+                    stats: ServerStats) {
+        match self.intake {
+            some(queue) => {
+                var handed: List<net.TcpStream> = []
+                queue.with_lock(fn(waiting: List<net.TcpStream>) {
+                    for {
+                        let next: Option<net.TcpStream> = waiting.pop()
+                        if next.is_none() { break }
+                        handed.push((move next).expect("handed stream"))
+                    }
+                })
+                for {
+                    let next: Option<net.TcpStream> = handed.pop()
+                    if next.is_none() { break }
+                    self.admit((move next).expect("intake stream"),
+                               connections, tokens, token_indexes, stats)
+                }
+            }
+            none => {}
+        }
     }
 
     fn stop_accepting() {
@@ -547,6 +665,10 @@ pub unique class WebServer {
             let events: List<poll.Event> = self.watch.wait(
                 self.options.max_events,
                 if draining { 50 } else { self.options.poll_timeout_ms })?
+            let batch_now: int = time.monotonic_nanos()
+            if !draining {
+                self.drain_intake(connections, tokens, token_indexes, stats)
+            }
             for event: poll.Event in events {
                 if event.token == 0 {
                     if !draining {
@@ -560,7 +682,8 @@ pub unique class WebServer {
                     some(index) => {
                         var keep: bool = false
                         match connections[index].process(
-                                event, self.app, self.options, stats) {
+                                event, batch_now, self.app, self.options,
+                                stats) {
                             ok(active) => { keep = active }
                             err(problem) => {
                                 stats.connection_errors += 1

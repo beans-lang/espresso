@@ -16,6 +16,11 @@ pub class QueryValues {
         self.values.push(value)
     }
 
+    fn clear() {
+        self.names.clear()
+        self.values.clear()
+    }
+
     pub fn count() -> int { return self.names.len() }
 
     pub fn get(name: string) -> Option<string> {
@@ -91,9 +96,9 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
     return ok(target.to_string())
 }
 
-fn parse_query(text: string) -> Result<QueryValues> {
-    let result: QueryValues = new QueryValues()
-    if text == "" { return ok(result) }
+fn parse_query_into(text: string, result: QueryValues) -> Result<bool> {
+    result.clear()
+    if text == "" { return ok(true) }
     for pair: string in text.split("&") {
         var name: string = pair
         var value: string = ""
@@ -108,19 +113,17 @@ fn parse_query(text: string) -> Result<QueryValues> {
             decode_url_component(name, true)?,
             decode_url_component(value, true)?)
     }
-    return ok(result)
+    return ok(true)
 }
 
-fn request_path(target: string) -> Result<List<string>> {
-    if target == "" || !target.starts_with("/") {
+fn split_path_into(raw_path: string, segments: List<string>) -> Result<bool> {
+    segments.clear()
+    if raw_path == "" || !raw_path.starts_with("/") {
         return err("the request target must use origin form", "bad_request")
     }
-    let path_end: int = target.find("?").or(target.len())
-    let raw_path: string = target.slice(0, path_end)
     if raw_path.find("#").is_some() {
         return err("a request target cannot contain a fragment", "bad_request")
     }
-    var segments: List<string> = []
     var start: int = 1
     for start <= raw_path.len() {
         var end: int = raw_path.find_byte(47, start)
@@ -133,7 +136,7 @@ fn request_path(target: string) -> Result<List<string>> {
         if end == raw_path.len() { break }
         start = end + 1
     }
-    return ok(move segments)
+    return ok(true)
 }
 
 fn join_path(segments: List<string>) -> string {
@@ -141,48 +144,109 @@ fn join_path(segments: List<string>) -> string {
     return "/{segments.join("/")}"
 }
 
-/// One request as Espresso presents it to middleware and endpoints.
+/// One request as Espresso presents it to middleware and endpoints. The
+/// server reuses one instance for every request on a connection, so a
+/// handler that wants request data beyond its own return must copy it.
 pub unique class HttpRequest {
-    pub method: string
-    pub target: string
-    pub path: string
-    pub segments: List<string>
-    pub query: QueryValues
-    pub headers: http.Headers
-    pub body: Bytes
+    pub method: string = ""
+    pub target: string = ""
+    /// The raw request path: the target up to `?`, undecoded.
+    pub path: string = "/"
+    pub headers: http.Headers = new http.Headers()
+    pub body: Bytes = new Bytes(0)
+    pub trailer_fields: http.Headers = new http.Headers()
     pub route_values: Map<string, string> = {}
     pub remote: net.Address
-    pub keep_alive: bool
+    pub keep_alive: bool = true
+    query_start: int = -1
+    path_plain: bool = true
+    segments_cache: List<string> = []
+    segments_ready: bool = false
+    query_cache: QueryValues = new QueryValues()
+    query_ready: bool = false
 
-    fn init(served: http.ServedRequest,
-            remote: net.Address,
-            move parsed_segments: List<string>,
-            parsed_query: QueryValues) {
-        self.method = served.head.method
-        self.target = served.head.target
-        self.segments = move parsed_segments
-        self.path = join_path(self.segments)
-        self.query = parsed_query
-        self.headers = served.head.headers
-        self.body = served.body.slice(0, served.body.len())
+    fn init(remote: net.Address) {
         self.remote = remote
-        self.keep_alive = served.keep_alive
     }
 
-    pub static fn from_served(served: http.ServedRequest,
-                              remote: net.Address) -> Result<HttpRequest> {
-        let segments: List<string> = request_path(served.head.target)?
-        var query_text: string = ""
-        match served.head.target.find("?") {
-            some(at) => {
-                query_text = served.head.target.slice(
-                    at + 1, served.head.target.len())
-            }
-            none => {}
+    /// Resets this request in place around a freshly parsed head. The body
+    /// arrives afterwards through `body` events.
+    fn begin(head: http.Request) -> Result<bool> {
+        self.method = head.method
+        self.target = head.target
+        self.headers = head.headers
+        self.keep_alive = head.keep_alive
+        self.body.resize(0)
+        if self.trailer_fields.count() != 0 {
+            self.trailer_fields = new http.Headers()
         }
-        let query: QueryValues = parse_query(query_text)?
-        return ok(new HttpRequest(
-            served, remote, move segments, query))
+        self.route_values.clear()
+        self.segments_ready = false
+        self.query_ready = false
+        if head.target == "" || head.target.byte_at(0) != 47 {
+            return err("the request target must use origin form", "bad_request")
+        }
+        match head.target.find("?") {
+            some(at) => {
+                self.path = head.target.slice(0, at)
+                self.query_start = at + 1
+            }
+            none => {
+                self.path = head.target
+                self.query_start = -1
+            }
+        }
+        var plain: bool = true
+        var index: int = 0
+        for index < self.path.len() {
+            let byte: int = self.path.byte_at(index)
+            if byte == 37 || byte == 35 {
+                plain = false
+                break
+            }
+            index += 1
+        }
+        self.path_plain = plain
+        return ok(true)
+    }
+
+    /// True when `path` needs no percent-decoding to compare literally.
+    fn plain_path() -> bool { return self.path_plain }
+
+    fn ensure_segments() -> Result<bool> {
+        if self.segments_ready { return ok(true) }
+        split_path_into(self.path, self.segments_cache)?
+        self.segments_ready = true
+        return ok(true)
+    }
+
+    /// Decoded path segments. `/users/42` yields `users`, `42`.
+    pub fn segment_count() -> Result<int> {
+        self.ensure_segments()?
+        return ok(self.segments_cache.len())
+    }
+
+    pub fn segment_at(index: int) -> Result<string> {
+        self.ensure_segments()?
+        return ok(self.segments_cache[index])
+    }
+
+    /// The decoded path, one segment per slash, rebuilt canonically.
+    pub fn decoded_path() -> Result<string> {
+        self.ensure_segments()?
+        return ok(join_path(self.segments_cache))
+    }
+
+    /// Query fields, parsed on first use and cached for this request.
+    pub fn query() -> Result<QueryValues> {
+        if self.query_ready { return ok(self.query_cache) }
+        var text: string = ""
+        if self.query_start >= 0 {
+            text = self.target.slice(self.query_start, self.target.len())
+        }
+        parse_query_into(text, self.query_cache)?
+        self.query_ready = true
+        return ok(self.query_cache)
     }
 
     pub fn route(name: string) -> Option<string> {
@@ -200,6 +264,14 @@ pub unique class HttpResponse {
 
     pub fn init() {}
 
+    fn reset() {
+        self.status = 200
+        self.reason = "OK"
+        if self.headers.count() != 0 { self.headers.clear() }
+        self.body.resize(0)
+        self.completed = false
+    }
+
     pub fn header(name: string, value: string) {
         self.headers.add(name, value)
     }
@@ -216,37 +288,84 @@ pub unique class HttpResponse {
         self.completed = true
     }
 
+    /// Copies `body` into the reused response buffer — the allocation-free
+    /// way to finish a response.
+    pub fn text_body(status: int, reason: string,
+                     body: string, content_type: string) {
+        self.status = status
+        self.reason = reason
+        self.body.resize(0)
+        self.body.append_string(body)
+        if content_type != "" && !self.headers.has("Content-Type") {
+            self.headers.add("Content-Type", content_type)
+        }
+        self.completed = true
+    }
+
     pub fn text(status: int, reason: string, body: string) {
-        self.bytes(status, reason, Bytes.from(body),
-                   "text/plain; charset=utf-8")
+        self.text_body(status, reason, body, "text/plain; charset=utf-8")
     }
 
     pub fn no_content() {
         self.status = 204
         self.reason = "No Content"
-        self.body = new Bytes(0)
+        self.body.resize(0)
         self.completed = true
     }
 }
 
-/// Per-request state shared by middleware and the chosen endpoint.
+/// Per-request state shared by middleware and the chosen endpoint. The
+/// server keeps one context per connection and resets it between requests.
 pub class HttpContext {
     pub request: HttpRequest
     pub response: HttpResponse = new HttpResponse()
     pub services: ServiceProvider
-    pub trace_id: string
     pub head_only: bool = false
+    root_services: ServiceProvider
+    scope_active: bool = false
+    trace_seq: int = 0
+    trace_text: string = ""
 
     pub fn init(move request: HttpRequest,
-                services: ServiceProvider,
-                trace_id: string) {
+                services: ServiceProvider) {
         self.request = move request
         self.services = services
-        self.trace_id = trace_id
+        self.root_services = services
     }
 
+    /// A stable id for logs, formatted on first use.
+    pub fn trace_id() -> string {
+        if self.trace_text == "" && self.trace_seq != 0 {
+            self.trace_text = "espresso-{self.trace_seq}"
+        }
+        return self.trace_text
+    }
+
+    fn begin(head: http.Request, sequence: int) -> Result<bool> {
+        self.response.reset()
+        self.head_only = false
+        self.trace_seq = sequence
+        self.trace_text = ""
+        return self.request.begin(head)
+    }
+
+    fn open_scope() -> Result<bool> {
+        if self.root_services.has_registrations() {
+            self.services = self.root_services.create_scope()?
+            self.scope_active = true
+        }
+        return ok(true)
+    }
+
+    /// Closes the request's service scope, if one was opened.
     pub fn close() -> Result<bool> {
-        return self.services.close_scope()
+        if self.scope_active {
+            self.scope_active = false
+            let scope: ServiceProvider = self.services
+            self.services = self.root_services
+            return scope.close_scope()
+        }
+        return ok(true)
     }
 }
 
@@ -270,8 +389,8 @@ pub fn write_json_text(response: HttpResponse,
                        status: int,
                        reason: string,
                        encoded: string) -> Result<bool> {
-    response.bytes(status, reason, Bytes.from(encoded),
-                   "application/json; charset=utf-8")
+    response.text_body(status, reason, encoded,
+                       "application/json; charset=utf-8")
     return ok(true)
 }
 
@@ -283,9 +402,9 @@ fn write_problem(context: HttpContext,
     problem.add("status", json.Value.from_int(status))?
     problem.add("title", json.Value.from_string(title))?
     problem.add("detail", json.Value.from_string(detail))?
-    problem.add("traceId", json.Value.from_string(context.trace_id))?
-    context.response.bytes(
-        status, title, Bytes.from(json.stringify(problem)?),
+    problem.add("traceId", json.Value.from_string(context.trace_id()))?
+    context.response.text_body(
+        status, title, json.stringify(problem)?,
         "application/problem+json; charset=utf-8")
     return ok(true)
 }

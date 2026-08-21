@@ -26,7 +26,7 @@ pub class HelloController {
 
 fn validate(context: espresso.HttpContext) -> Result<bool> {
     let errors: espresso.ValidationErrors = new espresso.ValidationErrors()
-    errors.required("name", context.request.query.get("name").or(""))
+    errors.required("name", context.request.query()?.get("name").or(""))
     errors.integer_range("age", 12, 18, 120)
     if !errors.is_valid() {
         return espresso.write_validation_problem(context, errors)

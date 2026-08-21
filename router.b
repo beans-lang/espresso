@@ -47,16 +47,16 @@ class Route {
             if kind == 2 {
                 return true
             }
-            if request_index >= request.segments.len() { return false }
+            if request_index >= request.segments_cache.len() { return false }
             if kind == 0 {
                 if self.segments[route_index] !=
-                       request.segments[request_index] {
+                       request.segments_cache[request_index] {
                     return false
                 }
             }
             request_index += 1
         }
-        return request_index == request.segments.len()
+        return request_index == request.segments_cache.len()
     }
 
     fn capture_values(request: HttpRequest) {
@@ -65,15 +65,15 @@ class Route {
             let kind: int = self.kinds[route_index]
             if kind == 2 {
                 var rest: List<string> = []
-                for index: int in request_index..request.segments.len() {
-                    rest.push(request.segments[index])
+                for index: int in request_index..request.segments_cache.len() {
+                    rest.push(request.segments_cache[index])
                 }
                 request.route_values[self.names[route_index]] = rest.join("/")
                 return
             }
             if kind == 1 {
                 request.route_values[self.names[route_index]] =
-                    request.segments[request_index]
+                    request.segments_cache[request_index]
             }
             request_index += 1
         }
@@ -142,8 +142,44 @@ fn parsed_route(method: string,
 /// Method-and-path router with static, parameter, and final catch-all segments.
 pub class Router {
     routes: List<Route> = []
+    static_get: Map<string, int> = {}
+    static_post: Map<string, int> = {}
+    static_put: Map<string, int> = {}
+    static_patch: Map<string, int> = {}
+    static_delete: Map<string, int> = {}
+    static_other: Map<string, int> = {}
 
     pub fn init() {}
+
+    other_static_count: int = 0
+
+    fn static_lookup(method: string, path: string) -> Option<int> {
+        if method == "GET" { return self.static_get.get(path) }
+        if method == "POST" { return self.static_post.get(path) }
+        if method == "PUT" { return self.static_put.get(path) }
+        if method == "PATCH" { return self.static_patch.get(path) }
+        if method == "DELETE" { return self.static_delete.get(path) }
+        if self.other_static_count == 0 { return none }
+        return self.static_other.get("{method} {path}")
+    }
+
+    fn index_static(route: Route, index: int) {
+        var fully_static: bool = true
+        for kind: int in route.kinds {
+            if kind != 0 { fully_static = false }
+        }
+        if !fully_static { return }
+        let path: string = join_path(route.segments)
+        if route.method == "GET" { self.static_get[path] = index }
+        else if route.method == "POST" { self.static_post[path] = index }
+        else if route.method == "PUT" { self.static_put[path] = index }
+        else if route.method == "PATCH" { self.static_patch[path] = index }
+        else if route.method == "DELETE" { self.static_delete[path] = index }
+        else {
+            self.static_other["{route.method} {path}"] = index
+            self.other_static_count += 1
+        }
+    }
 
     pub fn map(method: string,
                pattern: string,
@@ -156,6 +192,7 @@ pub class Router {
                     "route_conflict")
             }
         }
+        self.index_static(route, self.routes.len())
         self.routes.push(route)
         return ok(true)
     }
@@ -194,6 +231,26 @@ pub class Router {
 
     fn dispatch(context: HttpContext) -> Result<bool> {
         let requested: string = context.request.method
+
+        // Fast path: a literal request path hitting a fully static route on
+        // its exact method (HEAD borrows GET). No decoding, no allocation.
+        if context.request.plain_path() && requested != "OPTIONS" {
+            var hit: Option<int> =
+                self.static_lookup(requested, context.request.path)
+            if hit.is_none() && requested == "HEAD" {
+                hit = self.static_get.get(context.request.path)
+            }
+            match hit {
+                some(index) => {
+                    context.head_only = requested == "HEAD"
+                    let route: Route = self.routes[index]
+                    return route.handler(context)
+                }
+                none => {}
+            }
+        }
+
+        context.request.ensure_segments()?
         var best_score: int = -1
         var selected: Option<Route> = none
         var allowed: List<string> = []

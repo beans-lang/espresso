@@ -98,26 +98,33 @@ pub class WebApplication {
         return layer(context, next)
     }
 
-    fn next_trace_id() -> string {
-        self.trace_sequence += 1
-        return "espresso-{self.trace_sequence}"
+    /// One reusable per-connection context over the root provider.
+    fn new_context(remote: net.Address) -> HttpContext {
+        return new HttpContext(new HttpRequest(remote), self.services)
     }
 
-    /// Runs one already-parsed standard-library request through Espresso.
-    /// The caller must close the returned context after sending its response.
-    pub fn handle(served: http.ServedRequest,
-                  remote: net.Address) -> Result<HttpContext> {
+    /// Resets `context` around a freshly parsed head, stamping a trace
+    /// sequence. The request body streams in afterwards.
+    fn begin_request(context: HttpContext,
+                     head: http.Request) -> Result<bool> {
+        self.trace_sequence += 1
+        return context.begin(head, self.trace_sequence)
+    }
+
+    /// Runs the middleware pipeline and endpoint for the request currently
+    /// held by `context`. The caller sends `context.response` afterwards and
+    /// then calls `context.close()`.
+    fn handle_context(context: HttpContext) -> Result<bool> {
         if self.closed { return err("the application is closed", "closed") }
-        let request: HttpRequest = HttpRequest.from_served(served, remote)?
-        let scope: ServiceProvider = if self.services.has_registrations() {
-            self.services.create_scope()?
-        } else { self.services }
-        let context: HttpContext = new HttpContext(
-            move request, scope, self.next_trace_id())
+        context.open_scope()?
         match self.run_pipeline(context, 0) {
             ok(_) => {}
             err(problem) => {
-                if !context.response.completed {
+                if problem.kind == "bad_request" &&
+                   !context.response.completed {
+                    write_problem(
+                        context, 400, "Bad Request", problem.msg)?
+                } else if !context.response.completed {
                     let detail: string = if self.options.detailed_errors {
                         problem.msg
                     } else {
@@ -135,6 +142,22 @@ pub class WebApplication {
            !context.response.headers.has("Server") {
             context.response.header("Server", self.options.server_header)
         }
+        return ok(true)
+    }
+
+    /// Runs one already-parsed standard-library request through Espresso.
+    /// The caller must close the returned context after sending its response.
+    pub fn handle(served: http.ServedRequest,
+                  remote: net.Address) -> Result<HttpContext> {
+        if self.closed { return err("the application is closed", "closed") }
+        let context: HttpContext = self.new_context(remote)
+        self.begin_request(context, served.head)?
+        context.request.body.append(served.body)
+        context.request.keep_alive = served.keep_alive
+        if served.trailer_fields.count() != 0 {
+            context.request.trailer_fields = served.trailer_fields
+        }
+        self.handle_context(context)?
         return ok(context)
     }
 
