@@ -41,6 +41,14 @@ calling thread accepts connections and deals them round-robin to the
 workers, and each worker runs its own event loop, application, and service
 provider. Workers share nothing.
 
+Start from `espresso.recommended_workers()` unless you have measured
+otherwise. It returns 1: on macOS a single loop matches a four-process Bun
+lane's throughput at lower CPU per request, because the kernel serializes
+accepts through one listener and extra loops mostly buy contention. Give
+more workers only to CPU-heavy handlers that saturate the one loop — and
+route blocking work through a `WorkerPool` either way, which is what keeps
+a single loop honest.
+
 ```beans
 fn build_app() -> Result<espresso.WebApplication> {
     let builder: espresso.WebApplicationBuilder =
@@ -52,7 +60,7 @@ fn build_app() -> Result<espresso.WebApplication> {
 
 fn main() {
     var factories: List<send fn() -> Result<espresso.WebApplication>> = []
-    for index: int in 0..4 {
+    for index: int in 0..espresso.recommended_workers() {
         factories.push(build_app)
     }
     espresso.serve(new espresso.ServerOptions(), move factories)

@@ -21,6 +21,9 @@ struct Completion {
 // Responder can carry it into a worker thread.
 struct LoopMailbox {
     completions: Mutex<List<Completion>>
+    // Raised after a push, lowered by the drain — the loop skips the mailbox
+    // lock on the many cycles where nothing deferred has landed.
+    flagged: Atomic<bool>
     signal: int
 }
 
@@ -99,6 +102,9 @@ pub unique class Responder implements Send {
                 waiting.push((move next).expect("completion"))
             }
         })
+        // Raise the flag only after the payload is in the queue, and wake only
+        // after the flag: the drain the wake triggers must see both.
+        self.mailbox.flagged.store(true, MemoryOrder.release)
         return poll.wake(self.mailbox.signal)
     }
 }

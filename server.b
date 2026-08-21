@@ -92,7 +92,6 @@ unique class ServerConnection {
     events: List<http.RequestEvent> = []
     read_buffer: Bytes
     output: Bytes = new Bytes(0)
-    response_buffer: Bytes = new Bytes(0)
     output_offset: int = 0
     close_after_write: bool = false
     read_paused: bool = false
@@ -113,6 +112,10 @@ unique class ServerConnection {
     // Parsed events that arrived behind a deferred request. They replay in
     // order once its response lands, so pipelining stays well-ordered.
     deferred_events: List<http.RequestEvent> = []
+    // The head most recently adopted by the context. It goes back to the
+    // parser for reuse only when the next head has replaced every alias to
+    // it — the swap in absorb_event's head arm.
+    previous_head: Option<http.Request> = none
 
     fn init(move stream: net.TcpStream,
             peer: net.Address,
@@ -131,7 +134,6 @@ unique class ServerConnection {
         self.parser = http.RequestParser.with_limits(limits)
         self.read_buffer = new Bytes(options.read_buffer_bytes)
         self.output.reserve(1024)
-        self.response_buffer.reserve(1024)
         self.last_active_nanos = time.monotonic_nanos()
         self.max_body = options.max_body_bytes
     }
@@ -197,27 +199,26 @@ unique class ServerConnection {
                 500, "Internal Server Error",
                 "response body exceeds the configured limit", false, options)
         }
-        http.encode_response_into(
-            self.response_buffer, status, reason, headers, body,
-            keep_alive && !self.close_after_write)?
-        if head_only && body.len() <= self.response_buffer.len() {
-            self.response_buffer.resize(
-                self.response_buffer.len() - body.len())
-        }
         self.compact_output()
-        let pending_size: int =
-            self.output.len() + self.response_buffer.len()
-        if pending_size > options.max_pending_output_bytes {
+        let start: int = self.output.len()
+        http.encode_response_append(
+            self.output, status, reason, headers, body,
+            keep_alive && !self.close_after_write)?
+        if head_only && body.len() <= self.output.len() - start {
+            self.output.resize(self.output.len() - body.len())
+        }
+        if self.output.len() > options.max_pending_output_bytes {
+            // Roll the refused response back off the queue.
+            self.output.resize(start)
             self.close_after_write = true
             self.read_paused = true
-            if self.output.len() == 0 {
+            if start == 0 {
                 return self.append_error(
                     503, "Service Unavailable",
                     "connection output queue is full", false, options)
             }
             return ok(false)
         }
-        self.output.append(self.response_buffer)
         if !keep_alive { self.close_after_write = true }
         if self.output.len() >= options.max_pending_output_bytes / 2 {
             self.read_paused = true
@@ -233,15 +234,14 @@ unique class ServerConnection {
         let headers: http.Headers = new http.Headers()
         headers.add("Content-Type", "text/plain; charset=utf-8")
         let body: Bytes = Bytes.from(detail)
+        self.compact_output()
+        let start: int = self.output.len()
         // Error text is bounded by the framework, so this call cannot recurse
         // through the response-body limit.
-        http.encode_response_into(
-            self.response_buffer, status, reason, headers, body, keep_alive)?
-        self.compact_output()
-        let pending_size: int =
-            self.output.len() + self.response_buffer.len()
-        if pending_size <= options.max_pending_output_bytes {
-            self.output.append(self.response_buffer)
+        http.encode_response_append(
+            self.output, status, reason, headers, body, keep_alive)?
+        if self.output.len() > options.max_pending_output_bytes {
+            self.output.resize(start)
         }
         if !keep_alive { self.close_after_write = true }
         return ok(true)
@@ -342,7 +342,18 @@ unique class ServerConnection {
                 match self.context {
                     some(active) => {
                         match app.begin_request(active, request) {
-                            ok(_) => {}
+                            ok(_) => {
+                                // begin_request replaced the context's view
+                                // of the previous head, so its shell can go
+                                // back to the parser for the next message.
+                                match self.previous_head {
+                                    some(done) => {
+                                        self.parser.recycle(done)
+                                    }
+                                    none => {}
+                                }
+                                self.previous_head = some(request)
+                            }
                             err(problem) => {
                                 self.append_error(
                                     400, "Bad Request", problem.msg,
@@ -511,6 +522,13 @@ unique class ServerConnection {
                             self.read_buffer, 0, count, self.events) {
                         ok(_) => {
                             self.absorb(app, options, stats)?
+                            // A read that left the buffer unfilled drained the
+                            // socket, and the poller is level-triggered: more
+                            // data re-fires it. Skip the recv that would only
+                            // report EAGAIN.
+                            if count < self.read_buffer.len() {
+                                return ok(true)
+                            }
                         }
                         err(problem) => {
                             self.append_error(
@@ -582,6 +600,14 @@ unique class ServerConnection {
     fn close() -> Result<bool> { return self.stream.close() }
 }
 
+/// One worker's connection handoff lane. The acceptor pushes under the lock,
+/// raises the flag, and wakes the worker's poller; the flag lets the worker
+/// skip the lock on cycles where nothing was handed over.
+pub struct IntakeQueue {
+    pub streams: Mutex<List<net.TcpStream>>
+    pub flagged: Atomic<bool>
+}
+
 /// One level-triggered HTTP/1.1 event loop.
 pub unique class WebServer {
     app: WebApplication
@@ -589,10 +615,11 @@ pub unique class WebServer {
     listener: net.TcpListener
     watch: poll.Poller
     stopping: Atomic<bool> = new Atomic<bool>(false)
-    intake: Option<Mutex<List<net.TcpStream>>> = none
-    // Deferred responses from worker threads land here; the loop drains it
-    // on every wakeup, exactly like the intake queue.
+    intake: Option<IntakeQueue> = none
+    // Deferred responses from worker threads land here; the mailbox flag
+    // mirrors the intake flag so quiet cycles skip this lock too.
     mail: Mutex<List<Completion>> = new Mutex([])
+    mail_flagged: Atomic<bool> = new Atomic<bool>(false)
     next_token: int = 1
     listener_live: bool = true
     resources_live: bool = true
@@ -639,6 +666,7 @@ pub unique class WebServer {
     fn mailbox() -> LoopMailbox {
         return LoopMailbox {
             completions: self.mail,
+            flagged: self.mail_flagged,
             signal: self.watch.wake_handle(),
         }
     }
@@ -665,9 +693,10 @@ pub unique class WebServer {
     }
 
     /// Accepts connections handed over by an acceptor thread. The acceptor
-    /// pushes streams under the lock and then pokes `control().signal`
-    /// through `poll.wake`; this loop drains the queue on every wakeup.
-    pub fn set_intake(queue: Mutex<List<net.TcpStream>>) {
+    /// pushes streams under the lock, raises the queue's flag, and then pokes
+    /// `control().signal` through `poll.wake`; this loop drains the queue on
+    /// wakeups whose flag is up.
+    pub fn set_intake(queue: IntakeQueue) {
         self.intake = some(queue)
     }
 
@@ -763,8 +792,12 @@ pub unique class WebServer {
                     stats: ServerStats) {
         match self.intake {
             some(queue) => {
+                if !queue.flagged.load(MemoryOrder.acquire) { return }
+                // Lower the flag before taking the queue: a push that lands
+                // in between raises it again and wakes, so nothing is lost.
+                queue.flagged.store(false, MemoryOrder.release)
                 var handed: List<net.TcpStream> = []
-                queue.with_lock(fn(waiting: List<net.TcpStream>) {
+                queue.streams.with_lock(fn(waiting: List<net.TcpStream>) {
                     for {
                         let next: Option<net.TcpStream> = waiting.pop()
                         if next.is_none() { break }
@@ -789,6 +822,10 @@ pub unique class WebServer {
                          tokens: List<int>,
                          token_indexes: Map<int, int>,
                          stats: ServerStats) -> Result<bool> {
+        if !self.mail_flagged.load(MemoryOrder.acquire) { return ok(true) }
+        // Lower the flag before taking the queue: a deliver that lands in
+        // between raises it again and wakes, so nothing is lost.
+        self.mail_flagged.store(false, MemoryOrder.release)
         var landed: List<Completion> = []
         self.mail.with_lock(fn(waiting: List<Completion>) {
             for {
@@ -863,6 +900,9 @@ pub unique class WebServer {
         var connections: List<ServerConnection> = []
         var tokens: List<int> = []
         var token_indexes: Map<int, int> = {}
+        // Reused across wakeups; wait_into overwrites the first `count`
+        // entries each cycle, so the steady loop allocates no event objects.
+        var events: List<poll.Event> = []
         let stats: ServerStats = new ServerStats()
         var draining: bool = false
         var deadline: int = 0
@@ -909,9 +949,10 @@ pub unique class WebServer {
                 break
             }
 
-            let events: List<poll.Event> = self.watch.wait(
+            let event_count: int = self.watch.wait_into(
                 self.options.max_events,
-                if draining { 50 } else { self.options.poll_timeout_ms })?
+                if draining { 50 } else { self.options.poll_timeout_ms },
+                events)?
             let batch_now: int = time.monotonic_nanos()
             if !draining {
                 self.drain_intake(connections, tokens, token_indexes, stats)
@@ -920,7 +961,8 @@ pub unique class WebServer {
             // waits for in-flight work before closing those connections.
             self.drain_completions(
                 batch_now, connections, tokens, token_indexes, stats)?
-            for event: poll.Event in events {
+            for position: int in 0..event_count {
+                let event: poll.Event = events[position]
                 if event.token == 0 {
                     if !draining {
                         self.accept_ready(

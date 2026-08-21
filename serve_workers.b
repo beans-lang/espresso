@@ -82,7 +82,7 @@ fn failed_control() -> ServerControl {
 
 fn spawn_worker(
         limits: WorkerLimits,
-        intake: Mutex<List<net.TcpStream>>,
+        intake: IntakeQueue,
         controls: Channel<ServerControl>,
         move factory: send fn() -> Result<WebApplication>) -> Thread<Result<bool>> {
     return thread.spawn(fn() move(factory) -> Result<bool> {
@@ -108,6 +108,18 @@ fn spawn_worker(
             }
         }
     })
+}
+
+/// The worker count `serve` should be given when the caller has no stronger
+/// opinion. One: measured on macOS (arm64, 8-core), a single loop matches a
+/// four-process Bun lane's throughput at lower CPU per request, while extra
+/// workers mostly buy kernel-side contention — the platform serializes accepts
+/// through one listener regardless. Give more workers only to CPU-heavy
+/// handlers that saturate the one loop, and route blocking work through
+/// `WorkerPool` either way. Linux gets its own measured default once the
+/// Linux lane lands.
+pub fn recommended_workers() -> int {
+    return 1
 }
 
 /// Runs one acceptor plus one serving event loop per factory, all answering
@@ -137,10 +149,13 @@ pub fn serve(
     let limits: WorkerLimits = worker_limits(options)
     let handshake: Channel<ServerControl> = new Channel(worker_count)
 
-    var intakes: List<Mutex<List<net.TcpStream>>> = []
+    var intakes: List<IntakeQueue> = []
     var workers: List<Thread<Result<bool>>> = []
     for index: int in 0..worker_count {
-        let intake: Mutex<List<net.TcpStream>> = new Mutex([])
+        let intake: IntakeQueue = IntakeQueue {
+            streams: new Mutex([]),
+            flagged: new Atomic<bool>(false),
+        }
         intakes.push(intake)
         let factory: send fn() -> Result<WebApplication> =
             factories.pop().expect("worker factory")
@@ -181,7 +196,7 @@ pub fn serve(
                     }
                     if accept_broke { break }
                     carrier.push((move accepted).expect("accepted stream"))
-                    intakes[turn].with_lock(
+                    intakes[turn].streams.with_lock(
                         fn(waiting: List<net.TcpStream>) {
                             let next: Option<net.TcpStream> = carrier.pop()
                             if !next.is_none() {
@@ -189,6 +204,9 @@ pub fn serve(
                                     "handoff stream"))
                             }
                         })
+                    // Flag after the push, wake after the flag: the drain the
+                    // wake triggers must see both.
+                    intakes[turn].flagged.store(true, MemoryOrder.release)
                     let woken: Result<bool> =
                         poll.wake(controls[turn].signal)
                     turn += 1
