@@ -66,6 +66,39 @@ is the raw undecoded path; `decoded_path()` returns the decoded form.
 `request.query()` parses the query string the first time it is called, and
 `context.trace_id()` builds its id the same way.
 
+## Blocking work
+
+Handlers run on the event loop, so they must not block it. Work that waits
+— a database call, a slow computation, an outside service — goes to a
+`WorkerPool`, and the request finishes later through a `Responder`:
+
+```beans
+let pool: espresso.WorkerPool = espresso.WorkerPool.start(4).expect("pool")
+
+app.get("/report", fn(context: espresso.HttpContext) -> Result<bool> {
+    let responder: espresso.Responder = context.respond_later()?
+    pool.submit(fn() move(responder) {
+        let report: string = build_report_slowly()
+        let sent: Result<bool> = responder.json(200, "OK", report)
+    })?
+    return ok(true)
+}).expect("route")
+```
+
+`respond_later()` marks the request deferred and returns a move-only `Send`
+handle. The connection stops reading until the responder answers, so
+pipelined requests behind it still get their responses in order. Exactly
+one sending call wins; a late or repeated send is dropped once the request
+is answered or the connection is gone. A deferred request nobody answers
+gets a `503` after `ServerOptions.pending_timeout_ms` (default 30 s) and
+the connection closes.
+
+The pool is plain threads over one channel. `submit` blocks when
+`queue_depth` jobs are already waiting — backpressure, never loss — and
+`close()` lets queued jobs finish, then joins the threads. With
+`espresso.serve`, build one pool per worker inside its factory: the pool
+handle stays on its own loop, and only the jobs are `Send`.
+
 ## Dependency injection
 
 Register services before `build()`. Constructor parameters are resolved by type.
@@ -99,7 +132,7 @@ pub class UsersController {
 
 ## Production controls
 
-`ServerOptions` bounds connections, parser fields, request bodies, response bodies, pending output, requests per connection, idle time, and graceful shutdown time. The default bind address is loopback. `ServerControl.stop()` wakes the poller and starts graceful shutdown.
+`ServerOptions` bounds connections, parser fields, request bodies, response bodies, pending output, requests per connection, idle time, deferred-response time, and graceful shutdown time. The default bind address is loopback. `ServerControl.stop()` wakes the poller and starts graceful shutdown; a graceful stop waits for in-flight deferred responses.
 
 Useful middleware:
 
@@ -151,4 +184,18 @@ shape for every request, and return the same response body and content type.
 
 ## Current boundary
 
-Espresso is ready for HTTP APIs, but Beans does not yet have first-class async closures. Endpoint and middleware function values are therefore synchronous and must not do long blocking work on the event-loop thread. Put blocking work behind a worker service or a separate process. TLS and HTTP/2 termination should currently sit in a reverse proxy; the Beans standard library can still be used directly when an app needs lower-level TLS, HTTP/2, or WebSocket handling.
+Beans does not yet have first-class async closures, so endpoint and
+middleware function values are synchronous. That is no longer a "never
+wait" rule: blocking work goes behind `respond_later()` and a `WorkerPool`,
+and the event loop stays free. When async closures land in Beans, deferral
+becomes the implementation detail under async handlers.
+
+TLS and HTTP/2 termination still sit in a reverse proxy. This is
+sequencing, not a wall: the standard library already has a pollable
+server-side `TlsListener` (PEM, PKCS#12, SNI, ALPN) and an
+`Http2Transport` at h2spec parity with nghttp2's own server. Native TLS in
+espresso needs a `TlsStream` `Send` audit and want-read/want-write states
+in the connection driver; HTTP/2 then plugs in as a second connection
+driver selected by ALPN onto the same `HttpContext` model. Both are planned
+right after 1.0. The standard library remains usable directly today for
+lower-level TLS, HTTP/2, or WebSocket handling.

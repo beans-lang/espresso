@@ -14,7 +14,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 cd "$BEANS_ROOT"
 
-cases=(di routing config_logging features fuzz server)
+cases=(di routing config_logging features fuzz server defer)
 for name in "${cases[@]}"; do
     "$BEANSC" run "$ROOT/tests/$name.b" >"$tmp/$name.interp"
     diff -u "$ROOT/tests/$name.out" "$tmp/$name.interp"

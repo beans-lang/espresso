@@ -135,6 +135,9 @@ pub class WebApplication {
                 }
             }
         }
+        // A deferred request answers through its Responder; the buffered
+        // response object is never sent, so no defaults are stamped on it.
+        if context.deferred { return ok(true) }
         if !context.response.completed {
             context.response.no_content()
         }
@@ -144,6 +147,10 @@ pub class WebApplication {
         }
         return ok(true)
     }
+
+    // Deferred responses come from worker threads without a context, so the
+    // server asks for the header it should stamp on them.
+    fn server_header() -> string { return self.options.server_header }
 
     /// Runs one already-parsed standard-library request through Espresso.
     /// The caller must close the returned context after sending its response.
