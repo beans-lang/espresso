@@ -7,7 +7,7 @@ class Route {
     names: List<string>
     kinds: List<int>
     score: int
-    handler: fn(HttpContext) -> Result<bool>
+    handler: fn(HttpContext) -> Result<ActionResult>
 
     fn init(method: string,
             pattern: string,
@@ -15,7 +15,7 @@ class Route {
             move names: List<string>,
             move kinds: List<int>,
             score: int,
-            handler: fn(HttpContext) -> Result<bool>) {
+            handler: fn(HttpContext) -> Result<ActionResult>) {
         self.method = method
         self.pattern = pattern
         self.segments = move segments
@@ -82,7 +82,7 @@ class Route {
 
 fn parsed_route(method: string,
                 pattern: string,
-                handler: fn(HttpContext) -> Result<bool>) -> Result<Route> {
+                handler: fn(HttpContext) -> Result<ActionResult>) -> Result<Route> {
     if method == "" { return err("a route needs an HTTP method", "route") }
     if pattern == "" || !pattern.starts_with("/") {
         return err("a route pattern must start with /", "route")
@@ -183,7 +183,7 @@ pub class Router {
 
     pub fn map(method: string,
                pattern: string,
-               handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         let route: Route = parsed_route(method, pattern, handler)?
         for existing: Route in self.routes {
             if existing.same_shape(route) {
@@ -198,27 +198,27 @@ pub class Router {
     }
 
     pub fn get(pattern: string,
-               handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("GET", pattern, handler)
     }
 
     pub fn post(pattern: string,
-                handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("POST", pattern, handler)
     }
 
     pub fn put(pattern: string,
-               handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PUT", pattern, handler)
     }
 
     pub fn patch(pattern: string,
-                 handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                 handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PATCH", pattern, handler)
     }
 
     pub fn delete(pattern: string,
-                  handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                  handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("DELETE", pattern, handler)
     }
 
@@ -244,7 +244,8 @@ pub class Router {
                 some(index) => {
                     context.head_only = requested == "HEAD"
                     let route: Route = self.routes[index]
-                    return route.handler(context)
+                    let produced: ActionResult = route.handler(context)?
+                    return produced.execute(context)
                 }
                 none => {}
             }
@@ -279,7 +280,8 @@ pub class Router {
             some(route) => {
                 route.capture_values(context.request)
                 context.head_only = requested == "HEAD"
-                return route.handler(context)
+                let produced: ActionResult = route.handler(context)?
+                return produced.execute(context)
             }
             none => {}
         }

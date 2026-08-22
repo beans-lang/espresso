@@ -1,0 +1,24 @@
+registered 2
+mapped 8
+show 200 [order 7 style plain]
+styled 200 [order 7 style fancy]
+missing 404 [{"status":404,"title":"Not Found","detail":"The requested resource does not exist.","traceId":"espresso-3"}]
+price 200 [order 7 total 1000 agent beans-test]
+bad-route 400 [{"status":400,"title":"Bad Request","detail":"show.id must be an integer, got 'seven'","traceId":"espresso-5"}]
+bad-query 400 [{"status":400,"title":"Bad Request","detail":"price.count must be an integer, got 'lots'","traceId":"espresso-6"}]
+no-query 400 [{"status":400,"title":"Bad Request","detail":"price.count is required","traceId":"espresso-7"}]
+place 201 [placed beans-1 x2 express true tags 2]
+bad-json 400 [{"status":400,"title":"Bad Request","detail":"The request body is not valid JSON.","traceId":"espresso-9"}]
+wrong-shape 400 [{"status":400,"title":"Bad Request","detail":"OrderRequest.count must be an integer","traceId":"espresso-10"}]
+missing-field 400 [{"status":400,"title":"Bad Request","detail":"OrderRequest.tags is required","traceId":"espresso-11"}]
+invalid 400 [{"status":400,"title":"Validation Failed","traceId":"espresso-12","errors":[{"field":"sku","message":"sku is required","code":"required"},{"field":"count","message":"count must be between 1 and 100","code":"range"}]}]
+note 200 [note on 9: rush it for beans-2]
+context 200 [trace espresso-14 order 3 unit 250]
+auth-none 403 [{"status":403,"title":"Forbidden","detail":"The request was not authorized.","traceId":"espresso-15"}]
+auth-wrong 403 [{"status":403,"title":"Forbidden","detail":"The request was not authorized.","traceId":"espresso-16"}]
+auth-ok 200 [the admin panel]
+limit-1 200 [computed]
+limit-2 200 [computed]
+limit-3 429 retry 60
+report 200 [<h1>Weekly &lt;Orders&gt;</h1><ul><li>espresso=3</li><li>latte=1</li></ul>]
+report-type text/html; charset=utf-8

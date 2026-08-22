@@ -31,7 +31,9 @@ pub class WebApplicationBuilder {
 
 /// Routes and middleware over one root service provider.
 pub class WebApplication {
-    services: ServiceProvider
+    /// The root provider. Create scopes from it for work outside a
+    /// request; inside one, use context.services.
+    pub services: ServiceProvider
     options: AppOptions
     router: Router = new Router()
     middleware: List<fn(HttpContext,
@@ -52,35 +54,48 @@ pub class WebApplication {
         return ok(true)
     }
 
+    /// Adds an object middleware at the same position use() would. An
+    /// object carries configuration and state; both forms share the one
+    /// pipeline in registration order.
+    pub fn use_middleware(layer: Middleware) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        self.middleware.push(
+            fn(context: HttpContext,
+               next: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                return layer.handle(context, next)
+            })
+        return ok(true)
+    }
+
     pub fn map(method: string,
                pattern: string,
-               handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         if self.closed { return err("the application is closed", "closed") }
         return self.router.map(method, pattern, handler)
     }
 
     pub fn get(pattern: string,
-               handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("GET", pattern, handler)
     }
 
     pub fn post(pattern: string,
-                handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("POST", pattern, handler)
     }
 
     pub fn put(pattern: string,
-               handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PUT", pattern, handler)
     }
 
     pub fn patch(pattern: string,
-                 handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                 handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PATCH", pattern, handler)
     }
 
     pub fn delete(pattern: string,
-                  handler: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                  handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("DELETE", pattern, handler)
     }
 

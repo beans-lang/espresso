@@ -6,9 +6,8 @@ import std.net
 import std.thread
 import std.time
 
-fn fast(context: espresso.HttpContext) -> Result<bool> {
-    context.response.text(200, "OK", "fast")
-    return ok(true)
+fn fast(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text("fast")
 }
 
 fn client(port: int, control: espresso.ServerControl) -> string {
@@ -80,30 +79,30 @@ fn main() {
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
     app.get("/fast", fast).expect("route")
-    app.get("/slow", fn(context: espresso.HttpContext) -> Result<bool> {
+    app.get("/slow", fn(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
         let responder: espresso.Responder = context.respond_later()?
         pool.submit(fn() move(responder) {
             time.sleep_millis(50)
             let sent: Result<bool> = responder.text(200, "OK", "slow")
         })?
-        return ok(true)
+        return espresso.detached()
     }).expect("route")
-    app.get("/twice", fn(context: espresso.HttpContext) -> Result<bool> {
+    app.get("/twice", fn(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
         let responder: espresso.Responder = context.respond_later()?
         pool.submit(fn() move(responder) {
             let first: Result<bool> = responder.text(200, "OK", "one")
             // The second send must be refused by the one-shot flag.
             let refused: Result<bool> = responder.text(200, "OK", "two")
         })?
-        return ok(true)
+        return espresso.detached()
     }).expect("route")
-    app.get("/drop", fn(context: espresso.HttpContext) -> Result<bool> {
+    app.get("/drop", fn(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
         let responder: espresso.Responder = context.respond_later()?
         pool.submit(fn() move(responder) {
             time.sleep_millis(900)
             let late: Result<bool> = responder.text(200, "OK", "late")
         })?
-        return ok(true)
+        return espresso.detached()
     }).expect("route")
 
     let options: espresso.ServerOptions = new espresso.ServerOptions()

@@ -5,9 +5,8 @@ import std.http
 import std.io
 import std.net
 
-fn endpoint(context: espresso.HttpContext) -> Result<bool> {
-    context.response.text(200, "OK", context.request.path)
-    return ok(true)
+fn endpoint(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text(context.request.path)
 }
 
 fn request(target: string) -> http.ServedRequest {

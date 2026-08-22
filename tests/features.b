@@ -10,41 +10,37 @@ pub class GreetingService {
 }
 
 @espresso.controller(route: "/api")
-pub class HelloController {
+pub class HelloController extends espresso.Controller {
     greeter: GreetingService
 
     pub fn init(greeter: GreetingService) { self.greeter = greeter }
 
-    @espresso.http_get(route: "/hello/\{name\}")
-    pub fn hello(context: espresso.HttpContext) -> Result<bool> {
-        context.response.text(
-            200, "OK", self.greeter.text(
-                context.request.route("name").or("missing")))
-        return ok(true)
+    @espresso.get(route: "/hello/\{name\}")
+    pub fn hello(@espresso.route name: string) ->
+        Result<espresso.ActionResult> {
+        return self.ok_text(self.greeter.text(name))
     }
 }
 
-fn validate(context: espresso.HttpContext) -> Result<bool> {
+fn validate(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     let errors: espresso.ValidationErrors = new espresso.ValidationErrors()
     errors.required("name", context.request.query()?.get("name").or(""))
     errors.integer_range("age", 12, 18, 120)
     if !errors.is_valid() {
-        return espresso.write_validation_problem(context, errors)
+        espresso.write_validation_problem(context, errors)?
+        return espresso.detached()
     }
-    context.response.no_content()
-    return ok(true)
+    return espresso.no_content()
 }
 
-fn ok_handler(context: espresso.HttpContext) -> Result<bool> {
-    context.response.text(200, "OK", "ok")
-    return ok(true)
+fn ok_handler(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text("ok")
 }
 
 fn main_app() -> Result<bool> {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
-    builder.services.add_singleton(
-        type_of(GreetingService), type_of(GreetingService))?
+    builder.services.singleton<GreetingService>()?
     io.println("controllers registered {espresso.add_controllers(builder)?}")
     let app: espresso.WebApplication = builder.build()?
 

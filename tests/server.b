@@ -5,9 +5,8 @@ import std.io
 import std.net
 import std.thread
 
-fn hello(context: espresso.HttpContext) -> Result<bool> {
-    context.response.text(200, "OK", "ok")
-    return ok(true)
+fn hello(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text("ok")
 }
 
 fn client(port: int, control: espresso.ServerControl) -> string {

@@ -4,10 +4,8 @@ import espresso
 import std.io
 import std.time
 
-fn item(context: espresso.HttpContext) -> Result<bool> {
-    context.response.text(
-        200, "OK", context.request.route("id").or("missing"))
-    return ok(true)
+fn item(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text(context.request.route("id").or("missing"))
 }
 
 fn main() {

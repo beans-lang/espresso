@@ -1,3 +1,9 @@
+// Annotated controllers.
+//
+// A @controller class is discovered by scanning the reflection registry,
+// registered as a scoped service, and each annotated action is compiled
+// once into an ActionPlan — route pattern, parameter extractors, filters
+// — so a request runs with no metadata lookups.
 package espresso
 
 import std.reflect
@@ -10,32 +16,84 @@ pub annotation controller {
 
 @target(value: ["method"])
 @retention(value: "runtime")
-pub annotation http_get {
+pub annotation get {
     route: string = ""
 }
 
 @target(value: ["method"])
 @retention(value: "runtime")
-pub annotation http_post {
+pub annotation post {
     route: string = ""
 }
 
 @target(value: ["method"])
 @retention(value: "runtime")
-pub annotation http_put {
+pub annotation put {
     route: string = ""
 }
 
 @target(value: ["method"])
 @retention(value: "runtime")
-pub annotation http_patch {
+pub annotation patch {
     route: string = ""
 }
 
 @target(value: ["method"])
 @retention(value: "runtime")
-pub annotation http_delete {
+pub annotation delete {
     route: string = ""
+}
+
+/// The optional base class for controllers: carries the request context
+/// and the result helpers, so an action reads as
+/// `return self.ok(json.encode(order)?)`. Deriving from it is a choice —
+/// any class with action annotations is a controller.
+pub class Controller {
+    current: Option<HttpContext> = none
+
+    /// Called by the dispatcher before the action runs.
+    pub fn attach(context: HttpContext) {
+        self.current = some(context)
+    }
+
+    /// The request being served. Only valid inside an action.
+    pub fn context() -> HttpContext {
+        return self.current.expect(
+            "controller context outside a request")
+    }
+
+    /// 200 with an application/json body already encoded as text —
+    /// pair it with json.encode(value).
+    pub fn ok(encoded: string) -> Result<ActionResult> {
+        return json_text(encoded)
+    }
+
+    /// 200 text/plain.
+    pub fn ok_text(body_text: string) -> Result<ActionResult> {
+        return text(body_text)
+    }
+
+    /// 201 with an application/json body.
+    pub fn created(encoded: string) -> Result<ActionResult> {
+        return created_json(encoded)
+    }
+
+    pub fn no_content() -> Result<ActionResult> {
+        return no_content()
+    }
+
+    pub fn not_found() -> Result<ActionResult> {
+        return not_found()
+    }
+
+    pub fn bad_request(detail: string) -> Result<ActionResult> {
+        return problem(400, "Bad Request", detail)
+    }
+
+    pub fn problem(status: int, title: string,
+                   detail: string) -> Result<ActionResult> {
+        return problem(status, title, detail)
+    }
 }
 
 class ControllerEndpoint {
@@ -72,21 +130,21 @@ fn endpoint_annotation(method: reflect.Method) -> Result<Option<ControllerEndpoi
     for annotation: reflect.Annotation in method.annotations() {
         var verb: string = ""
         match annotation.qualified_name() {
-            "espresso.http_get" => { verb = "GET" }
-            "espresso.http_post" => { verb = "POST" }
-            "espresso.http_put" => { verb = "PUT" }
-            "espresso.http_patch" => { verb = "PATCH" }
-            "espresso.http_delete" => { verb = "DELETE" }
+            "espresso.get" => { verb = "GET" }
+            "espresso.post" => { verb = "POST" }
+            "espresso.put" => { verb = "PUT" }
+            "espresso.patch" => { verb = "PATCH" }
+            "espresso.delete" => { verb = "DELETE" }
             _ => {}
         }
         if verb == "" { continue }
         if found.is_some() {
-            return err("controller method {method.name()} has more than one HTTP annotation", "controller")
+            return err("controller action {method.name()} has more than one HTTP annotation", "controller")
         }
         found = some(new ControllerEndpoint(
             verb, annotation_string(annotation, "route")?))
     }
-    return ok(found)
+    return ok(move found)
 }
 
 fn controller_pattern(prefix: string, action: string) -> Result<string> {
@@ -105,48 +163,16 @@ fn controller_pattern(prefix: string, action: string) -> Result<string> {
     return ok("{left}{right}")
 }
 
-fn validate_controller_method(method: reflect.Method) -> Result<bool> {
-    if !method.is_public() || method.is_static() ||
-       method.is_async() || method.is_generic() {
-        return err("controller method {method.name()} must be public, synchronous, instance, and non-generic", "controller")
-    }
-    let parameters: List<reflect.Parameter> = method.parameters()
-    if parameters.len() != 1 ||
-       parameters[0].type().qualified_name() !=
-           type_of(HttpContext).qualified_name() ||
-       parameters[0].passing() != reflect.Passing.borrowed {
-        return err("controller method {method.name()} must take one borrowed HttpContext", "controller")
-    }
-    if method.result_type().qualified_name() !=
-           type_of(Result<bool>).qualified_name() {
-        return err("controller method {method.name()} must return Result<bool>", "controller")
-    }
-    return ok(true)
-}
-
-fn controller_handler(controller_type: reflect.Type,
-                      method: reflect.Method) ->
-    fn(HttpContext) -> Result<bool> {
-    return fn(context: HttpContext) -> Result<bool> {
-        let receiver: reflect.Value =
-            context.services.resolve_value(controller_type)?
-        var returned: Option<reflect.Value> = none
-        match method.call(receiver, [reflect.value(context)]) {
-            ok(value) => { returned = some(value) }
-            err(problem) => {
-                return err(
-                    "controller {controller_type.qualified_name()}.{method.name()} failed: {problem.message()}",
-                    "controller")
-            }
-        }
-        let boxed: reflect.Value = returned.expect("controller result")
-        match boxed as? Result<bool> {
-            some(result) => { return result }
-            none => {
-                return err("controller returned the wrong runtime type", "controller")
-            }
+fn controller_filters(type: reflect.Type) -> List<reflect.Annotation> {
+    var filters: List<reflect.Annotation> = []
+    for annotation: reflect.Annotation in type.annotations() {
+        let name: string = annotation.qualified_name()
+        if name == "espresso.auth" || name == "espresso.validate" ||
+           name == "espresso.limit" {
+            filters.push(annotation)
         }
     }
+    return move filters
 }
 
 /// Registers every linked controller as a scoped service. Call before build.
@@ -157,29 +183,37 @@ pub fn add_controllers(builder: WebApplicationBuilder) -> Result<int> {
         if type.kind() != reflect.Kind.class_type {
             return err("@controller can only mark a class", "controller")
         }
-        builder.services.add_scoped(type, type)?
+        builder.services.add(type, type, ServiceLifetime.scoped)?
         count += 1
     }
     return ok(count)
 }
 
-/// Maps every annotated controller method. Call after build.
+/// Maps every annotated controller action. Call after build.
 pub fn map_controllers(app: WebApplication) -> Result<int> {
     var count: int = 0
+    let binder: Binder = new Binder()
     for type: reflect.Type in reflect.types() {
         match controller_annotation(type) {
             none => {}
             some(marker) => {
                 let prefix: string = annotation_string(marker, "route")?
+                let filters: List<reflect.Annotation> =
+                    controller_filters(type)
                 for method: reflect.Method in type.declared_methods() {
                     match endpoint_annotation(method)? {
                         none => {}
                         some(endpoint) => {
-                            validate_controller_method(method)?
+                            let plan: ActionPlan = build_action_plan(
+                                type, method, some(marker),
+                                filters, binder)?
                             app.map(
                                 endpoint.method,
                                 controller_pattern(prefix, endpoint.route)?,
-                                controller_handler(type, method))?
+                                fn(context: HttpContext) ->
+                                    Result<ActionResult> {
+                                    return plan.run(context)
+                                })?
                             count += 1
                         }
                     }

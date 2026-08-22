@@ -6,118 +6,147 @@ import espresso
 import std.encoding.json
 import std.http
 import std.io
+import std.log
 
-pub class Greeter { pub fn init() {} }
+// ---- services and models from the README ----------------------------------
 
-struct Message { message: string }
-
-fn console_sink(record: espresso.LogRecord) {
-    espresso.json_console_log(record)
+pub interface Clock {
+    fn now() -> int
 }
 
-fn json_message(context: espresso.HttpContext) -> Result<bool> {
-    let payload: Message = Message { message: "Hello, World!" }
-    return espresso.write_json_text(
-        context.response, 200, "OK", json.encode(payload)?)
+pub class SystemClock implements Clock {
+    pub fn init() {}
+    pub fn now() -> int { return 42 }
 }
 
-fn dom_handler(context: espresso.HttpContext) -> Result<bool> {
-    let reply: json.Value = json.Value.object()
-    reply.add("ok", json.Value.from_bool(true))?
-    return espresso.write_json(context.response, 201, "Created", reply)
+pub class Store {
+    pub fn init() {}
+    pub fn label() -> string { return "store" }
 }
 
-fn validate(context: espresso.HttpContext) -> Result<bool> {
-    let errors: espresso.ValidationErrors = new espresso.ValidationErrors()
-    let name: string = context.request.query()?.get("name").or("")
-    errors.required("name", name)
-    errors.length("name", name, 1, 64)
-    errors.integer_range("age", 30, 18, 120)
-    errors.add("email", "email is already taken", "conflict")
-    io.println("validation count {errors.count()} valid {errors.is_valid()} first {errors.at(0).code}")
-    if !errors.is_valid() {
-        return espresso.write_validation_problem(context, errors)
+pub class Greeter {
+    pub fn init() {}
+}
+
+pub class Config {
+    pub fn init() {}
+}
+
+fn load_config() -> Config { return new Config() }
+
+pub class NoteRequest {
+    pub text: string
+    pub fn init(move text: string) { self.text = move text }
+    pub fn validate(errors: espresso.ValidationErrors) {
+        errors.required("text", self.text)
     }
-    context.response.no_content()
-    return ok(true)
 }
 
-fn request_members(context: espresso.HttpContext) -> Result<bool> {
-    let decoded: string = context.request.decoded_path()?
-    let segments: int = context.request.segment_count()?
-    let first: string = if segments > 0 {
-        context.request.segment_at(0)?
-    } else { "" }
-    let query: espresso.QueryValues = context.request.query()?
-    let all: List<string> = query.all("tag")
-    io.println("path {decoded} segments {segments} first {first} tags {all.len()} q {query.count()} head_only {context.head_only}")
-    context.response.header("Cache-Control", "no-store")
-    context.response.text_body(200, "OK", "<b>hi</b>", "text/html")
-    return ok(true)
+// ---- the README's controller ----------------------------------------------
+
+@espresso.controller(route: "/hello")
+pub class HelloController extends espresso.Controller {
+    pub fn init() {}
+
+    @espresso.get(route: "/\{name\}")
+    pub fn hello(@espresso.route name: string) ->
+        Result<espresso.ActionResult> {
+        return self.ok_text("Hello, {name}!")
+    }
+}
+
+@espresso.controller(route: "/notes")
+pub class NotesController extends espresso.Controller {
+    pub fn init() {}
+
+    @espresso.validate
+    @espresso.post(route: "/\{id\}")
+    pub fn annotate(@espresso.route id: int,
+                    @espresso.query(default: "plain") style: string,
+                    @espresso.header user_agent: string,
+                    @espresso.body move note: NoteRequest,
+                    @espresso.inject clock: Clock) ->
+        Result<espresso.ActionResult> {
+        return self.ok_text(
+            "note {note.text} on {id} at {clock.now()} style {style} agent {user_agent}")
+    }
+}
+
+// ---- free-function results and middleware ----------------------------------
+
+fn plain(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text("plain")
 }
 
 fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
-    builder.options.detailed_errors = true
-    builder.options.server_header = "espresso"
-    builder.services.add_singleton(type_of(Greeter), type_of(Greeter))
-        .expect("greeter")
+
+    // typed registration in every lifetime, plus resolve
+    builder.services.add_singleton<Clock, SystemClock>().expect("clock")
+    builder.services.add_scoped<Store, Store>().expect("store")
+    builder.services.transient<Greeter>().expect("greeter")
+    espresso.add_singleton_factory<Config>(
+        builder.services,
+        fn(provider: espresso.ServiceProvider) -> Result<Config> {
+            return ok(load_config())
+        }).expect("factory")
+
+    // views registered before build
+    let views: espresso.Views = new espresso.Views()
+    views.add("hello", "<h1>\{\{title\}\}</h1>").expect("template")
+    espresso.add_views(builder, views).expect("views")
+
+    espresso.add_controllers(builder).expect("controllers")
     let app: espresso.WebApplication = builder.build().expect("app")
 
-    app.use(fn(context: espresso.HttpContext,
-               next: fn(espresso.HttpContext) -> Result<bool>) -> Result<bool> {
-        context.response.header("X-Request-Id", context.trace_id())
-        return next(context)
-    }).expect("trace middleware")
-    app.use(fn(context: espresso.HttpContext,
-               next: fn(espresso.HttpContext) -> Result<bool>) -> Result<bool> {
-        return espresso.security_headers(context, next)
-    }).expect("security")
+    // both middleware forms, including a package function as a value
+    app.use(espresso.security_headers).expect("security")
+    let logger: log.Logger =
+        espresso.console_logger("docs").expect("logger")
+    app.use_middleware(new espresso.RequestLog(logger)).expect("log")
 
-    let cors_options: espresso.CorsOptions = new espresso.CorsOptions()
-    cors_options.allowed_origins.push("https://app.example.com")
-    cors_options.allow_credentials = true
-    app.use(espresso.cors(cors_options).expect("cors")).expect("use cors")
-    app.use(espresso.fixed_window_rate_limit(100000, 60000).expect("limit"))
-        .expect("use limit")
-
-    let logger: espresso.Logger = new espresso.Logger()
-    logger.configure(espresso.LogLevel.warn, console_sink)
-    app.use(espresso.request_logging(logger)).expect("logging")
-
-    app.get("/json", json_message).expect("json")
-    app.post("/dom", dom_handler).expect("dom")
-    app.get("/validate", validate).expect("validate")
-    app.get("/files/\{*rest\}", request_members).expect("catch all")
-    app.map("REPORT", "/report", json_message).expect("custom method")
-    espresso.map_openapi(app, "/openapi.json", "Doc Check", "0.1.0")
-        .expect("openapi")
+    espresso.map_controllers(app).expect("map")
+    app.get("/plain", plain).expect("plain")
+    app.get("/page", fn(context: espresso.HttpContext) ->
+        Result<espresso.ActionResult> {
+        return espresso.view_model(
+            "hello", json.parse("\{\"title\":\"Docs\"\}").expect("model"))
+    }).expect("page")
+    espresso.map_openapi(app).expect("openapi")
 
     let host: espresso.TestHost = new espresso.TestHost(app)
-    io.println("json {host.get("/json").expect("json").text()}")
-    io.println("dom {host.post("/dom", "\{\}").expect("dom").status}")
-    let bad: espresso.TestResponse = host.get("/validate").expect("validate")
-    io.println("validate {bad.status} problem {bad.text().contains("\"errors\"")}")
-    let deep: espresso.TestResponse =
-        host.get("/files/a/b/c?tag=x&tag=y").expect("files")
-    io.println("files {deep.status} {deep.text()}")
-    io.println("404 {host.get("/nope").expect("404").status}")
-    io.println("405 {host.post("/json", "").expect("405").status}")
-    let headers: http.Headers = new http.Headers()
-    headers.add("Origin", "https://app.example.com")
-    headers.add("Access-Control-Request-Method", "GET")
-    io.println("preflight {host.send_with_headers("OPTIONS", "/json", headers).expect("pre").status}")
-    io.println("spec {host.get("/openapi.json").expect("spec").status}")
-    let logged: espresso.TestResponse = host.get("/json").expect("trace")
-    io.println("trace {logged.trace_id != ""} server {logged.headers.has("Server")}")
-    host.close().expect("close")
+    io.println("hello {host.get("/hello/Beans").expect("hello").text()}")
 
-    let config: espresso.Configuration = new espresso.Configuration()
-    config.set("server:port", "8080").expect("set")
-    config.add_arguments(["--server:port=0"]).expect("args")
-    let options: espresso.ServerOptions = new espresso.ServerOptions()
-    espresso.configure_server(config, options).expect("configure")
-    io.println("config port {options.port} host {options.host}")
-    io.println("workers {espresso.recommended_workers()}")
+    let headers: http.Headers = new http.Headers()
+    headers.add("Content-Type", "application/json")
+    headers.add("User-Agent", "docs-test")
+    let note: espresso.TestResponse = host.send_with_headers(
+        "POST", "/notes/9?style=fancy", headers,
+        "\{\"text\":\"remember\"\}").expect("note")
+    io.println("note {note.status} [{note.text()}]")
+    let invalid: espresso.TestResponse = host.send_with_headers(
+        "POST", "/notes/9", headers, "\{\"text\":\"\"\}").expect("bad note")
+    io.println("invalid {invalid.status} {invalid.text().contains("\"errors\"")}")
+
+    io.println("plain {host.get("/plain").expect("plain").text()}")
+    let page: espresso.TestResponse = host.get("/page").expect("page")
+    io.println("page {page.status} [{page.text()}]")
+    io.println("openapi {host.get("/openapi.json").expect("spec").status}")
+
+    // resolve<T> from a request scope
+    let scope: espresso.ServiceProvider =
+        app.services.create_scope().expect("scope")
+    let store: Store = scope.resolve<Store>().expect("resolve")
+    io.println("resolved {store.label()}")
+    scope.close().expect("scope close")
+
+    // validation helpers stand alone too
+    let errors: espresso.ValidationErrors = new espresso.ValidationErrors()
+    errors.required("name", "")
+    errors.length("name", "x", 2, 8)
+    errors.integer_range("age", 200, 1, 150)
+    io.println("validation {errors.count()} {errors.is_valid()} {errors.at(0).code}")
+
+    host.close().expect("close")
 }

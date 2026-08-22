@@ -101,21 +101,39 @@ pub class ServiceCollection {
             service_type, implementation_type, lifetime, factory))
     }
 
-    pub fn add_transient(service_type: reflect.Type,
-                         implementation_type: reflect.Type) -> Result<bool> {
-        return self.add(service_type, implementation_type,
+    /// Registers I as the implementation of S:
+    /// `services.add_transient<Clock, SystemClock>()`. The runtime-typed
+    /// `add` stays as the escape hatch for types only known at runtime —
+    /// which is what the controller scanner itself uses.
+    pub fn add_transient<S, I>() -> Result<bool> {
+        return self.add(type_of(S), type_of(I),
                         ServiceLifetime.transient)
     }
 
-    pub fn add_scoped(service_type: reflect.Type,
-                      implementation_type: reflect.Type) -> Result<bool> {
-        return self.add(service_type, implementation_type,
+    pub fn add_scoped<S, I>() -> Result<bool> {
+        return self.add(type_of(S), type_of(I),
                         ServiceLifetime.scoped)
     }
 
-    pub fn add_singleton(service_type: reflect.Type,
-                         implementation_type: reflect.Type) -> Result<bool> {
-        return self.add(service_type, implementation_type,
+    pub fn add_singleton<S, I>() -> Result<bool> {
+        return self.add(type_of(S), type_of(I),
+                        ServiceLifetime.singleton)
+    }
+
+    /// Registers a concrete type as itself:
+    /// `services.transient<Greeter>()`.
+    pub fn transient<T>() -> Result<bool> {
+        return self.add(type_of(T), type_of(T),
+                        ServiceLifetime.transient)
+    }
+
+    pub fn scoped<T>() -> Result<bool> {
+        return self.add(type_of(T), type_of(T),
+                        ServiceLifetime.scoped)
+    }
+
+    pub fn singleton<T>() -> Result<bool> {
+        return self.add(type_of(T), type_of(T),
                         ServiceLifetime.singleton)
     }
 
@@ -274,6 +292,20 @@ pub class ServiceProvider {
         }
     }
 
+    /// Resolves one service by its registered type:
+    /// `let store: Store = context.services.resolve<Store>()?`.
+    pub fn resolve<T>() -> Result<T> {
+        let boxed: reflect.Value = self.resolve_value(type_of(T))?
+        match boxed as? T {
+            some(value) => { return ok(value) }
+            none => {
+                return err(
+                    "registered service cannot be converted to {type_of(T).qualified_name()}",
+                    "service_type")
+            }
+        }
+    }
+
     /// Releases scoped services in reverse creation order. Closing the root
     /// provider also releases singleton services in reverse creation order.
     pub fn close() -> Result<bool> {
@@ -288,28 +320,6 @@ pub class ServiceProvider {
         self.closed = true
         return ok(true)
     }
-}
-
-/// A type witness for resolving one service. Beans does not infer a generic
-/// argument from a function's result, so this small value carries T explicitly.
-pub class ServiceKey<T> {
-    pub fn init() {}
-
-    pub fn resolve(provider: ServiceProvider) -> Result<T> {
-        let boxed: reflect.Value = provider.resolve_value(type_of(T))?
-        match boxed as? T {
-            some(value) => { return ok(value) }
-            none => {
-                return err(
-                    "registered service cannot be converted to {type_of(T).qualified_name()}",
-                    "service_type")
-            }
-        }
-    }
-}
-
-pub fn service<T>(provider: ServiceProvider, key: ServiceKey<T>) -> Result<T> {
-    return key.resolve(provider)
 }
 
 /// Registers a factory. T is inferred from the factory's declared result type.

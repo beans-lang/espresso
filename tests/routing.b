@@ -14,21 +14,20 @@ fn middleware(context: espresso.HttpContext,
     return ok(handled)
 }
 
-fn hello(context: espresso.HttpContext) -> Result<bool> {
+fn hello(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     let name: string = context.request.route("name").or("missing")
     let tag_count: int = context.request.query()?.all("tag").len()
-    context.response.text(200, "OK", "hello {name} tags {tag_count}")
-    return ok(true)
+    return espresso.text_status(200, "hello {name} tags {tag_count}")
 }
 
-fn json_echo(context: espresso.HttpContext) -> Result<bool> {
+fn json_echo(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     let input: json.Value = espresso.body_json(context.request)?
     let output: json.Value = json.Value.object()
     output.add("name", input.get("name").or(json.Value.null()))?
-    return espresso.write_json(context.response, 201, "Created", output)
+    return espresso.json_text_status(201, json.stringify(output)?)
 }
 
-fn broken(context: espresso.HttpContext) -> Result<bool> {
+fn broken(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     return err("database password must stay hidden", "db")
 }
 

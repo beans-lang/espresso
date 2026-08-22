@@ -1,0 +1,5 @@
+fuzz rounds 400 ok 63 client-errors 337 unexpected 0
+good 200 [beans|3|true|1|2]
+nested 200 [deep@2]
+typed 5:true:7
+typed-default 5:false:7

@@ -11,23 +11,20 @@ pub class SmokeGreeting {
 }
 
 @espresso.controller(route: "/api")
-pub class SmokeController {
+pub class SmokeController extends espresso.Controller {
     greeting: SmokeGreeting
 
     pub fn init(greeting: SmokeGreeting) { self.greeting = greeting }
 
-    @espresso.http_get(route: "/hello/\{name\}")
-    pub fn hello(context: espresso.HttpContext) -> Result<bool> {
-        context.response.text(
-            200, "OK", self.greeting.text(
-                context.request.route("name").or("missing")))
-        return ok(true)
+    @espresso.get(route: "/hello/\{name\}")
+    pub fn hello(@espresso.route name: string) ->
+        Result<espresso.ActionResult> {
+        return self.ok_text(self.greeting.text(name))
     }
 }
 
-fn live_handler(context: espresso.HttpContext) -> Result<bool> {
-    context.response.text(200, "OK", "live")
-    return ok(true)
+fn live_handler(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text("live")
 }
 
 fn live_client(port: int, control: espresso.ServerControl) -> bool {
@@ -43,8 +40,7 @@ fn live_client(port: int, control: espresso.ServerControl) -> bool {
 fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
-    builder.services.add_singleton(
-        type_of(SmokeGreeting), type_of(SmokeGreeting)).expect("greeting")
+    builder.services.singleton<SmokeGreeting>().expect("greeting")
     espresso.add_controllers(builder).expect("controller services")
     let app: espresso.WebApplication = builder.build().expect("app")
     espresso.map_controllers(app).expect("controllers")

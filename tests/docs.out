@@ -1,13 +1,8 @@
-json {"message":"Hello, World!"}
-dom 201
-validation count 3 valid false first required
-validate 400 problem true
-path /files/a/b/c segments 4 first files tags 2 q 2 head_only false
-files 200 <b>hi</b>
-404 404
-405 405
-preflight 204
-spec 200
-trace true server true
-config port 0 host 127.0.0.1
-workers 1
+hello Hello, Beans!
+note 200 [note remember on 9 at 42 style fancy agent docs-test]
+invalid 400 true
+plain plain
+page 200 [<h1>Docs</h1>]
+openapi 200
+resolved store
+validation 3 false required
