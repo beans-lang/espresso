@@ -475,7 +475,6 @@ Readers: `get(name) -> Option<string>`, `require(name) -> Result<string>`,
 
 ```beans
 let logger: espresso.Logger = new espresso.Logger()
-logger.configure(espresso.LogLevel.info, espresso.json_console_log)
 app.use(espresso.request_logging(logger))?
 
 logger.info("startup", "ready")
@@ -483,9 +482,21 @@ logger.warn("cache", "miss rate high", context.trace_id())
 logger.error("db", "connect failed", context.trace_id())
 ```
 
-Levels: `trace`, `debug`, `info`, `warn`, `error`, `none`. The default sink is
-`json_console_log`, one JSON object per line. A sink is any `fn(LogRecord)`, so
-sending records elsewhere is a one-liner.
+Levels: `trace`, `debug`, `info`, `warn`, `error`, `none`. A new `Logger`
+starts at `info` and writes one JSON object per line to standard output.
+
+To change the level or send records elsewhere, call `configure`. A sink is any
+`fn(LogRecord)`. Beans cannot pass another package's function as a value, so
+write the sink in your own package — including when all you want is the
+built-in one:
+
+```beans
+fn console_sink(record: espresso.LogRecord) {
+    espresso.json_console_log(record)
+}
+
+logger.configure(espresso.LogLevel.warn, console_sink)
+```
 
 Records carry `level`, `event`, `message`, `trace_id`, `monotonic_nanos`, and
 free-form fields:

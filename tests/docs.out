@@ -1,0 +1,13 @@
+json {"message":"Hello, World!"}
+dom 201
+validation count 3 valid false first required
+validate 400 problem true
+path /files/a/b/c segments 4 first files tags 2 q 2 head_only false
+files 200 <b>hi</b>
+404 404
+405 405
+preflight 204
+spec 200
+trace true server true
+config port 0 host 127.0.0.1
+workers 1
