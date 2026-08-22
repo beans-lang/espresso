@@ -1,0 +1,1 @@
+scan service: @service class espresso$entry.Highlander has no public initializer the container can call — a `singleton class` or a hand-built value registers through a factory (add_singleton_factory) instead

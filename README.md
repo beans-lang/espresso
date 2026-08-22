@@ -129,6 +129,29 @@ espresso.add_singleton_factory<Config>(
     })?
 ```
 
+Registration can also be discovered. `@espresso.service` marks a class;
+`espresso.add_services(builder)` scans and registers it as itself and as
+each interface it directly implements, forwarded so one scope shares one
+instance across all of its names:
+
+```beans
+@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
+pub class SystemClock implements Clock {
+    pub fn init() {}
+    pub fn now() -> int { return 0 }
+}
+
+espresso.add_services(builder)?
+```
+
+The lifetime is the `ServiceLifetime` enum and defaults to scoped. Two
+`@service` classes claiming the same service type is a scan-time error —
+drop the annotation from one and register your choice explicitly. A
+language `singleton class` cannot be container-activated and is refused
+at scan time; register its `.instance` through a factory instead.
+`@controller` classes are already scoped services and refuse a second
+`@service` marking.
+
 Scope discipline is validated: resolving a scoped service from the root
 provider, capturing a scoped service inside a singleton, and dependency
 cycles are all errors, not surprises.

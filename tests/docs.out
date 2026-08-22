@@ -1,3 +1,4 @@
+services 1
 hello Hello, Beans!
 note 200 [note remember on 9 at 42 style fancy agent docs-test]
 invalid 400 true
@@ -5,4 +6,5 @@ plain plain
 page 200 [<h1>Docs</h1>]
 openapi 200
 resolved store
+scanned cached:answer
 validation 3 false required

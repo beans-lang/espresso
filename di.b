@@ -9,6 +9,16 @@ pub enum ServiceLifetime {
     singleton
 }
 
+/// Marks a class for add_services discovery. The class registers as
+/// itself and as each interface it directly implements, under the given
+/// lifetime. Discovery is opt-in sugar over explicit registration —
+/// the composition root stays the place to look when it matters.
+@target(value: ["type"])
+@retention(value: "runtime")
+pub annotation service {
+    lifetime: ServiceLifetime = ServiceLifetime.scoped
+}
+
 class ServiceDescriptor {
     service_type: reflect.Type
     implementation_type: reflect.Type
@@ -349,4 +359,102 @@ pub fn add_scoped_factory<T>(services: ServiceCollection,
 pub fn add_singleton_factory<T>(services: ServiceCollection,
                                 factory: fn(ServiceProvider) -> Result<T>) -> Result<bool> {
     return add_factory(services, ServiceLifetime.singleton, factory)
+}
+
+fn scanned_service_annotation(
+    type: reflect.Type) -> Option<reflect.Annotation> {
+    for annotation: reflect.Annotation in type.annotations() {
+        if annotation.qualified_name() == "espresso.service" {
+            return some(annotation)
+        }
+    }
+    return none
+}
+
+fn scanned_service_lifetime(
+    annotation: reflect.Annotation) -> Result<ServiceLifetime> {
+    match annotation.argument("lifetime") {
+        some(argument) => {
+            let name: string = argument.value().text()
+            if name == "transient" {
+                return ok(ServiceLifetime.transient)
+            }
+            if name == "scoped" { return ok(ServiceLifetime.scoped) }
+            if name == "singleton" {
+                return ok(ServiceLifetime.singleton)
+            }
+            return err("unknown service lifetime '{name}'", "service")
+        }
+        none => { return ok(ServiceLifetime.scoped) }
+    }
+}
+
+/// Registers every linked @service class: as itself, and as each
+/// interface it directly implements, forwarded so one scope shares one
+/// instance across all of its names. Two @service classes claiming the
+/// same service type is an error here, not a silent override — drop
+/// @service from one and register your choice explicitly. Call before
+/// build, like add_controllers.
+pub fn add_services(builder: WebApplicationBuilder) -> Result<int> {
+    var count: int = 0
+    var claimed: Map<string, string> = {}
+    for type: reflect.Type in reflect.types() {
+        match scanned_service_annotation(type) {
+            none => {}
+            some(marker) => {
+                let shown: string = type.qualified_name()
+                if type.kind() != reflect.Kind.class_type {
+                    return err(
+                        "@service can only mark a class, got {shown}",
+                        "service")
+                }
+                if controller_annotation(type).is_some() {
+                    return err(
+                        "{shown} is a @controller, which is already a scoped service — drop its @service",
+                        "service")
+                }
+                if type.initializer().is_none() {
+                    return err(
+                        "@service class {shown} has no public initializer the container can call — a `singleton class` or a hand-built value registers through a factory (add_singleton_factory) instead",
+                        "service")
+                }
+                let lifetime: ServiceLifetime =
+                    scanned_service_lifetime(marker)?
+                var surfaces: List<reflect.Type> = [type]
+                for implemented: reflect.Type in type.interfaces() {
+                    surfaces.push(implemented)
+                }
+                for surface: reflect.Type in surfaces {
+                    let name: string = surface.qualified_name()
+                    match claimed.get(name) {
+                        some(owner) => {
+                            return err(
+                                "service {name} is provided by both {owner} and {shown} — drop @service from one and register your choice explicitly",
+                                "service_conflict")
+                        }
+                        none => {}
+                    }
+                    claimed[name] = shown
+                    if name == shown {
+                        builder.services.add(surface, type, lifetime)?
+                    } else {
+                        // Interface names forward to the concrete
+                        // registration, so a scope resolves the same
+                        // instance under every name.
+                        let concrete: reflect.Type = type
+                        builder.services.add_descriptor(
+                            new ServiceDescriptor(
+                                surface, type, lifetime,
+                                fn(provider: ServiceProvider) ->
+                                    Result<reflect.Value> {
+                                    return provider.resolve_value(
+                                        concrete)
+                                }))?
+                    }
+                }
+                count += 1
+            }
+        }
+    }
+    return ok(count)
 }

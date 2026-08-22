@@ -73,6 +73,7 @@ pub interface ProjectStore {
     fn remove(id: int) -> bool
 }
 
+@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
 pub class MemoryStore implements ProjectStore {
     projects: List<Project>
     next_project: int
@@ -145,6 +146,7 @@ pub class MemoryStore implements ProjectStore {
 }
 
 /// API keys with two levels. A real service would look these up.
+@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
 pub class KeyRing implements espresso.Authorizer {
     pub fn init() {}
 
@@ -389,8 +391,7 @@ fn dashboard_template() -> string {
 fn build_app(logger: log.Logger) -> Result<espresso.WebApplication> {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
-    builder.services.add_singleton<ProjectStore, MemoryStore>()?
-    builder.services.add_singleton<espresso.Authorizer, KeyRing>()?
+    espresso.add_services(builder)?
     let views: espresso.Views = new espresso.Views()
     views.add("dashboard", dashboard_template())?
     espresso.add_views(builder, views)?

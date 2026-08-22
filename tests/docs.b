@@ -24,6 +24,16 @@ pub class Store {
     pub fn label() -> string { return "store" }
 }
 
+pub interface Cache {
+    fn get(key: string) -> string
+}
+
+@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
+pub class MemoryCache implements Cache {
+    pub fn init() {}
+    pub fn get(key: string) -> string { return "cached:{key}" }
+}
+
 pub class Greeter {
     pub fn init() {}
 }
@@ -97,6 +107,7 @@ fn main() {
     views.add("hello", "<h1>\{\{title\}\}</h1>").expect("template")
     espresso.add_views(builder, views).expect("views")
 
+    io.println("services {espresso.add_services(builder).expect("services")}")
     espresso.add_controllers(builder).expect("controllers")
     let app: espresso.WebApplication = builder.build().expect("app")
 
@@ -139,6 +150,8 @@ fn main() {
         app.services.create_scope().expect("scope")
     let store: Store = scope.resolve<Store>().expect("resolve")
     io.println("resolved {store.label()}")
+    let cache: Cache = scope.resolve<Cache>().expect("cache")
+    io.println("scanned {cache.get("answer")}")
     scope.close().expect("scope close")
 
     // validation helpers stand alone too

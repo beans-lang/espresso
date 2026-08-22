@@ -4,6 +4,18 @@ This file records user-facing changes in each Espresso release.
 
 ## [0.2.0] - 2026-08-22
 
+### Added (post-tag)
+
+- `@espresso.service(lifetime: ServiceLifetime...)` and
+  `espresso.add_services(builder)`: opt-in discovery over explicit
+  registration. A marked class registers as itself and as each interface
+  it directly implements, forwarded so one scope resolves the same
+  instance under every name; the lifetime field is the enum and defaults
+  to scoped. Duplicate claims, `@service` on a `@controller`, and
+  `@service` on a language `singleton class` (which reflection cannot
+  construct) are scan-time errors with advice.
+
+
 One breaking release: the API changes once, completely, while it still
 costs nothing to change it. Requires Beans 0.1.29 for explicit type
 arguments, package functions as values, and reflection that resolves
