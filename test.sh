@@ -2,17 +2,31 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
-BEANS_ROOT=${BEANS_ROOT:-$(cd "$ROOT/../../beans" && pwd)}
-BEANSC=${BEANSC:-$BEANS_ROOT/build/beansc}
 
-if [[ ! -x "$BEANSC" ]]; then
-    echo "beansc not found at $BEANSC" >&2
+# A compiler built from a Beans checkout resolves the standard library and
+# runtime relative to that checkout, so those runs happen from its root. An
+# installed beansc carries its own, and runs from anywhere.
+if [[ -z ${BEANS_ROOT:-} && -x "$ROOT/../../beans/build/beansc" ]]; then
+    BEANS_ROOT=$(cd "$ROOT/../../beans" && pwd)
+fi
+if [[ -z ${BEANSC:-} ]]; then
+    if [[ -n ${BEANS_ROOT:-} && -x "$BEANS_ROOT/build/beansc" ]]; then
+        BEANSC="$BEANS_ROOT/build/beansc"
+    else
+        BEANSC=$(command -v beansc || true)
+    fi
+fi
+
+if [[ -z "$BEANSC" || ! -x "$BEANSC" ]]; then
+    echo "beansc not found: set BEANSC, set BEANS_ROOT, or put beansc on PATH" >&2
     exit 1
 fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-cd "$BEANS_ROOT"
+if [[ -n ${BEANS_ROOT:-} && "$BEANSC" == "$BEANS_ROOT/build/beansc" ]]; then
+    cd "$BEANS_ROOT"
+fi
 
 cases=(di routing config_logging features fuzz server defer)
 for name in "${cases[@]}"; do
