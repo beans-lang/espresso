@@ -6,7 +6,9 @@ Run each from the Beans checkout so imports use that standard library:
 BEANSC=/path/to/beans/build/beansc
 ESPRESSO=/path/to/espresso
 cd /path/to/beans
-for repro in return_await async_try branch_local closure_capture; do
+for repro in return_await async_try branch_local closure_capture \
+             unique_async_local preawait_local async_enum_move \
+             reflect_error_binding; do
   "$BEANSC" run "$ESPRESSO/notes/beans_repros/$repro/main.b"
 done
 ```

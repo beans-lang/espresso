@@ -1,0 +1,2 @@
+module preawait_local
+kind application

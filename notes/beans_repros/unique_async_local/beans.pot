@@ -1,0 +1,2 @@
+module unique_async_local
+kind application

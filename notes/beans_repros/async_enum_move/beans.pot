@@ -1,0 +1,2 @@
+module async_enum_move
+kind application
