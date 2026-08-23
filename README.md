@@ -228,27 +228,35 @@ records exactly five samples. Point it at the Beans checkout and compiler used
 for both revisions:
 
 ```sh
+BASELINE_COMMIT=$(git -C /path/to/espresso-origin-main rev-parse HEAD)
 BEANS_ROOT=/path/to/beans \
 BEANSC=/path/to/beans/build/beansc \
 ESPRESSO_ROOT=/path/to/espresso-origin-main \
-./bench.sh record origin-main.json origin-main.tsv
+./bench.sh record "$BASELINE_COMMIT" origin-main.json origin-main.tsv
 
 BEANS_ROOT=/path/to/beans \
 BEANSC=/path/to/beans/build/beansc \
-./bench.sh compare origin-main.json candidate.json candidate.tsv
+./bench.sh compare \
+  "$BASELINE_COMMIT" origin-main.json candidate.json candidate.tsv
 ```
 
 Record mode uses legacy programs with origin/main's sync `app.get`, TestHost,
 and server calls. That one old TestHost rate is the baseline for both the new
-sync and no-await async lanes. Compare mode uses the async-v2 programs in this
-checkout. `ESPRESSO_ROOT` selects the old checkout only for the record command.
-JSON carries the settings, all samples, medians and coefficients of variation;
-TSV is the raw machine-readable sample table. The compare refuses a baseline
-from a different machine, compiler or build setting. Every series must have a
-coefficient of variation at most 5%. Against the supplied origin/main median,
-sync TestHost throughput must stay at least 0.90x, a no-await async route at
-least 0.80x, and live server throughput at least 0.85x. Live p99 may grow at
-most 1.25x and CPU per request at most 1.20x.
+sync and no-await async lanes. The candidate TestHost lanes run in separate
+processes and sample order alternates. Compare mode uses the async-v2 programs
+in this checkout. `ESPRESSO_ROOT` selects the old checkout only for the record
+command.
+Both Espresso and Beans worktrees must be clean. The supplied baseline commit
+must be the exact 40-character revision. JSON records that revision, host and
+CPU identity, Beans revision, beansc SHA-256, settings, all samples, medians and
+coefficients of variation; TSV is the raw machine-readable sample table. Live
+CPU excludes a separate 2,000-request warmup process and divides the measured
+process CPU by its 20,000 requests. Compare refuses a baseline from a different
+machine, compiler or build setting. Every series must have a coefficient of
+variation at most 5%. Against the supplied origin/main median, sync TestHost
+throughput must stay at least 0.90x, a no-await async route at least 0.80x, and
+live server throughput at least 0.85x. Live p99 may grow at most 1.25x and CPU
+per request at most 1.20x.
 
 ## Versioning
 

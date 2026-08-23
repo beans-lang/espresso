@@ -28,14 +28,10 @@ fn main() {
     let app: espresso.WebApplication = builder.build().expect("app")
     app.get("/sync", handler).expect("route")
     let host: espresso.TestHost = new espresso.TestHost(app)
-    // Match the candidate's two 5,000-request warmup lanes.
-    for index: int in 0..10000 {
+    for index: int in 0..5000 {
         host.get("/sync").expect("warmup")
     }
     let rate: int = requests_per_second(host, 100000).expect("sample")
-    // Async routes did not exist in the old surface. Both gates compare with
-    // the same pre-migration synchronous TestHost lane.
-    io.println("sync_testhost_rps\trequests_per_second\t{rate}")
-    io.println("async_no_await_rps\trequests_per_second\t{rate}")
+    io.println("testhost_rps\trequests_per_second\t{rate}")
     host.close().expect("close")
 }
