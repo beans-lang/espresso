@@ -1,8 +1,20 @@
 package espresso
 
-import std.async as aio
 import std.net
 import std.thread
+import std.time
+
+class ServeShutdown {
+    stopping: Atomic<bool> = new Atomic<bool>(false)
+
+    fn init() {}
+
+    fn stop() { self.stopping.store(true, MemoryOrder.release) }
+
+    fn is_stopping() -> bool {
+        return self.stopping.load(MemoryOrder.acquire)
+    }
+}
 
 // Every option a worker needs after binding, flattened into Send scalars.
 struct WorkerLimits {
@@ -71,6 +83,8 @@ fn spawn_worker(
         limits: WorkerLimits,
         move listener: net.TcpListener,
         controls: Channel<Result<ServerControl>>,
+        finished: Channel<Result<bool>>,
+        shutdown: ServeShutdown,
         move factory: send fn() -> Result<WebApplication>) ->
         Thread<Result<bool>> {
     return thread.spawn_async(
@@ -91,9 +105,22 @@ fn spawn_worker(
                             return err(problem.msg, problem.kind)
                         }
                         ok(server) => {
-                            await controls.send_async(ok(server.control()))
-                            await server.run()?
-                            return ok(true)
+                            let control: ServerControl = server.control()
+                            await controls.send_async(ok(control))
+                            if shutdown.is_stopping() {
+                                let ignored_stop: Result<bool> = control.stop()
+                            }
+                            match await server.run() {
+                                ok(_) => {
+                                    finished.send(ok(true))
+                                    return ok(true)
+                                }
+                                err(problem) => {
+                                    finished.send(err(
+                                        problem.msg, problem.kind))
+                                    return err(problem.msg, problem.kind)
+                                }
+                            }
                         }
                     }
                 }
@@ -101,11 +128,86 @@ fn spawn_worker(
         })
 }
 
-async fn join_worker(move worker: Thread<Result<bool>>) -> Result<bool> {
-    match await worker.join_async() {
-        ok(run) => { return run }
-        err(problem) => { return err(problem.msg, problem.kind) }
-    }
+fn spawn_serve_cleanup(
+        move workers: List<Thread<Result<bool>>>,
+        controls: Channel<Result<ServerControl>>,
+        finished: Channel<Result<bool>>,
+        shutdown: ServeShutdown,
+        ready: Channel<Result<bool>>,
+        done: Channel<Result<bool>>,
+        count: int) -> Thread<bool> {
+    return thread.spawn(fn() move(workers) -> bool {
+        var live_controls: List<ServerControl> = []
+        var failed_message: string = ""
+        var failed_kind: string = ""
+        for index: int in 0..count {
+            match controls.receive() {
+                some(started) => {
+                    match started {
+                        ok(control) => { live_controls.push(control) }
+                        err(problem) => {
+                            if failed_message == "" {
+                                failed_message = problem.msg
+                                failed_kind = problem.kind
+                            }
+                        }
+                    }
+                }
+                none => {
+                    if failed_message == "" {
+                        failed_message = "a worker failed before serving"
+                        failed_kind = "worker"
+                    }
+                }
+            }
+        }
+
+        if failed_message == "" {
+            ready.send(ok(true))
+            var worker_finished: bool = false
+            for !shutdown.is_stopping() && !worker_finished {
+                match finished.try_receive() {
+                    some(result) => {
+                        worker_finished = true
+                        match result {
+                            ok(_) => {}
+                            err(problem) => {
+                                failed_message = problem.msg
+                                failed_kind = problem.kind
+                            }
+                        }
+                    }
+                    none => { time.sleep_millis(1) }
+                }
+            }
+        } else {
+            ready.send(err(failed_message, failed_kind))
+        }
+
+        shutdown.stop()
+        for control: ServerControl in live_controls {
+            let ignored_stop: Result<bool> = control.stop()
+        }
+        for workers.len() > 0 {
+            let worker: Thread<Result<bool>> =
+                workers.pop().expect("worker handle")
+            match worker.join() {
+                ok(_) => {}
+                err(problem) => {
+                    if failed_message == "" {
+                        failed_message = problem.msg
+                        failed_kind = problem.kind
+                    }
+                }
+            }
+        }
+        if failed_message == "" {
+            done.send(ok(true))
+        } else {
+            done.send(err(failed_message, failed_kind))
+        }
+        return true
+    })
 }
 
 /// The default remains one worker. Add workers only after measuring a
@@ -143,7 +245,11 @@ pub async fn serve(
             options.host, port, options.backlog)?)
     }
 
+    let shutdown: ServeShutdown = new ServeShutdown()
     let controls: Channel<Result<ServerControl>> = new Channel(count)
+    let finished: Channel<Result<bool>> = new Channel(count)
+    let ready: Channel<Result<bool>> = new Channel(1)
+    let done: Channel<Result<bool>> = new Channel(1)
     var workers: List<Thread<Result<bool>>> = []
     for index: int in 0..count {
         let factory: send fn() -> Result<WebApplication> =
@@ -151,61 +257,27 @@ pub async fn serve(
         let listener: net.TcpListener = listeners.pop().expect("worker listener")
         workers.push(spawn_worker(
             options.host, port, limits, move listener,
-            controls, move factory))
+            controls, finished, shutdown, move factory))
     }
 
-    var live_controls: List<ServerControl> = []
-    var failed_message: string = ""
-    var failed_kind: string = ""
-    for index: int in 0..count {
-        match await controls.receive_async() {
-            some(started) => {
-                match started {
-                    ok(control) => { live_controls.push(control) }
-                    err(problem) => {
-                        if failed_message == "" {
-                            failed_message = problem.msg
-                            failed_kind = problem.kind
-                        }
-                    }
-                }
-            }
-            none => {
-                if failed_message == "" {
-                    failed_message = "a worker failed before serving"
-                    failed_kind = "worker"
-                }
-            }
+    let cleanup: Thread<bool> = spawn_serve_cleanup(
+        move workers, controls, finished, shutdown, ready, done, count)
+    defer shutdown.stop()
+
+    match await ready.receive_async() {
+        some(_) => {}
+        none => {
+            return err("the serve cleanup stopped before startup", "worker")
         }
     }
-    if failed_message != "" {
-        for control: ServerControl in live_controls {
-            control.stop()?
+    let result: Result<bool> = match await done.receive_async() {
+        some(completed) => { completed }
+        none => {
+            err("the serve cleanup stopped before completion", "worker")
         }
     }
-    let joins: aio.TaskGroup<Result<bool>> =
-        new aio.TaskGroup<Result<bool>>()
-    for workers.len() > 0 {
-        let worker: Thread<Result<bool>> =
-            workers.pop().expect("worker handle")
-        joins.start(join_worker(move worker))
+    if !cleanup.join() {
+        return err("the serve cleanup returned failure", "worker")
     }
-    for index: int in 0..count {
-        match (await joins.next()).expect("worker join") {
-            ok(_) => {}
-            err(problem) => {
-                if failed_message == "" {
-                    failed_message = problem.msg
-                    failed_kind = problem.kind
-                    for control: ServerControl in live_controls {
-                        control.stop()?
-                    }
-                }
-            }
-        }
-    }
-    if failed_message != "" {
-        return err(failed_message, failed_kind)
-    }
-    return ok(true)
+    return result
 }
