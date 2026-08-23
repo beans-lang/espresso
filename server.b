@@ -22,6 +22,15 @@ pub class ServerOptions {
     pub max_body_bytes: int = 8388608
     pub max_response_body_bytes: int = 16777216
     pub max_pending_output_bytes: int = 33554432
+    /// Responses queue into the connection's output buffer and flush once
+    /// per parsed read batch, so a pipelined burst costs one write. A
+    /// burst that outgrows this watermark flushes early at the next
+    /// request boundary instead of holding finished responses.
+    pub flush_watermark_bytes: int = 65536
+    /// macOS delays a busy thread's kevent wakeups while sibling threads
+    /// sit in long waits. A pulse task bounds every driver wait to this
+    /// interval, the same guard the 0.2 poll loop carried. Zero disables.
+    pub wake_guard_ms: int = 25
     pub max_requests_per_connection: int = 1000000
     pub max_header_count: int = 128
     pub max_header_bytes: int = 65536
@@ -41,6 +50,7 @@ pub class ServerOptions {
            self.read_buffer_bytes <= 0 || self.max_body_bytes <= 0 ||
            self.max_response_body_bytes <= 0 ||
            self.max_pending_output_bytes <= 0 ||
+           self.flush_watermark_bytes <= 0 || self.wake_guard_ms < 0 ||
            self.max_requests_per_connection <= 0 ||
            self.max_header_count <= 0 || self.max_header_bytes <= 0 ||
            self.max_target_bytes <= 0 || self.max_head_span_bytes <= 0 {
@@ -287,14 +297,24 @@ unique class ServerConnection {
                     active.request.keep_alive = false
                 }
 
+                if self.output.len() >= options.flush_watermark_bytes {
+                    await self.flush(options)?
+                }
                 let work: aio.TaskGroup<RequestWait> =
                     new aio.TaskGroup<RequestWait>()
                 work.start(execute_request(app, active))
-                work.start(request_deadline(
-                    time.monotonic_nanos() +
-                    options.effective_request_timeout_ms() * 1000000))
-                let first: RequestWait =
-                    (await work.next()).expect("request wait")
+                var first: RequestWait = RequestWait.expired
+                match work.try_next() {
+                    some(done) => { first = done }
+                    none => {
+                        work.start(request_deadline(
+                            time.monotonic_nanos() +
+                            options.effective_request_timeout_ms() *
+                                1000000))
+                        first = (await work.next())
+                            .expect("request wait")
+                    }
+                }
                 work.cancel_all()
 
                 var queued: Result<bool> = ok(true)
@@ -335,7 +355,6 @@ unique class ServerConnection {
                 queued?
                 closed?
                 stats.responses += 1
-                await self.flush(options)?
                 return ok(!self.close_after_write)
             }
         }
@@ -479,6 +498,9 @@ unique class ServerConnection {
                                 }
                                 return ok(true)
                             }
+                            if self.output.len() > 0 {
+                                await self.flush(options)?
+                            }
                         }
                         err(problem) => {
                             self.append_error(
@@ -511,6 +533,9 @@ enum ServerEvent {
     listener(live: bool)
     stopping
     shutdown_deadline
+    pulse
+    intake_wake
+    intake_closed
     connection(report: ConnectionReport)
 }
 
@@ -521,6 +546,17 @@ async fn listener_ready(handle: int) -> ServerEvent {
 async fn shutdown_requested(event: aio.Event) -> ServerEvent {
     await event.wait()
     return ServerEvent.stopping
+}
+
+async fn wake_pulse(interval_ms: int) -> ServerEvent {
+    await aio.sleep_millis(interval_ms)
+    return ServerEvent.pulse
+}
+
+async fn intake_pulse(wake: Channel<bool>) -> ServerEvent {
+    let woke: Option<bool> = await wake.receive_async()
+    if woke.is_none() { return ServerEvent.intake_closed }
+    return ServerEvent.intake_wake
 }
 
 async fn shutdown_limit(deadline_nanos: int) -> ServerEvent {
@@ -555,7 +591,9 @@ async fn serve_connection(move stream: net.TcpStream,
 pub unique class WebServer {
     app: WebApplication
     options: ServerOptions
-    listener: net.TcpListener
+    listener: Option<net.TcpListener>
+    intake: Option<Channel<net.TcpStream>> = none
+    intake_wake: Option<Channel<bool>> = none
     stopping: Atomic<bool> = new Atomic<bool>(false)
     shutdown: aio.Event = new aio.Event()
     listener_live: bool = true
@@ -563,7 +601,7 @@ pub unique class WebServer {
 
     fn init(app: WebApplication,
             options: ServerOptions,
-            move listener: net.TcpListener) {
+            move listener: Option<net.TcpListener>) {
         self.app = app
         self.options = options
         self.listener = move listener
@@ -582,10 +620,34 @@ pub unique class WebServer {
                         move listener: net.TcpListener) -> Result<WebServer> {
         options.validate()?
         listener.set_nonblocking(true)?
-        return ok(new WebServer(app, options, move listener))
+        return ok(new WebServer(app, options, some(move listener)))
     }
 
-    pub fn port() -> Result<int> { return self.listener.port() }
+    /// A worker fed by an acceptor thread: connections arrive owned on
+    /// `streams`, and `wake` carries best-effort nudges — one drain per
+    /// nudge, one nudge per completion while streams wait. The acceptor
+    /// owns both channels and closes them to stop the worker accepting.
+    pub static fn adopt_intake(app: WebApplication,
+                               options: ServerOptions,
+                               streams: Channel<net.TcpStream>,
+                               wake: Channel<bool>) -> Result<WebServer> {
+        options.validate()?
+        let server: WebServer = new WebServer(app, options, none)
+        server.intake = some(streams)
+        server.intake_wake = some(wake)
+        return ok(move server)
+    }
+
+    pub fn port() -> Result<int> {
+        match self.listener {
+            some(bound) => { return bound.port() }
+            none => {
+                return err(
+                    "an intake worker has no listener of its own",
+                    "intake")
+            }
+        }
+    }
 
     pub fn control() -> ServerControl {
         return ServerControl {
@@ -594,9 +656,29 @@ pub unique class WebServer {
         }
     }
 
+    fn intake_source() -> Channel<net.TcpStream> {
+        return self.intake.expect("intake source")
+    }
+
+    fn intake_nudges() -> Channel<bool> {
+        return self.intake_wake.expect("intake nudges")
+    }
+
+    fn listener_handle() -> int {
+        match self.listener {
+            some(bound) => { return bound.poll_handle() }
+            none => { return 0 - 1 }
+        }
+    }
+
     fn stop_accepting() {
         if !self.listener_live { return }
-        let ignored: Result<bool> = self.listener.close()
+        match self.listener {
+            some(bound) => {
+                let ignored: Result<bool> = bound.close()
+            }
+            none => {}
+        }
         self.listener_live = false
     }
 
@@ -617,7 +699,16 @@ pub unique class WebServer {
         let children: aio.TaskGroup<ServerEvent> =
             new aio.TaskGroup<ServerEvent>()
         children.start(shutdown_requested(self.shutdown))
-        children.start(listener_ready(self.listener.poll_handle()))
+        let watched: int = self.listener_handle()
+        if watched >= 0 {
+            children.start(listener_ready(watched))
+        }
+        if self.intake_wake.is_some() {
+            children.start(intake_pulse(self.intake_nudges()))
+        }
+        if self.options.wake_guard_ms > 0 {
+            children.start(wake_pulse(self.options.wake_guard_ms))
+        }
 
         var active: int = 0
         var accepting: bool = true
@@ -650,8 +741,14 @@ pub unique class WebServer {
                     var accepted_this_turn: int = 0
                     for accepted_this_turn < 64 &&
                         active < self.options.max_connections {
-                        let accepted: Result<Option<net.TcpStream>> =
-                            self.listener.try_accept()
+                        var accepted: Result<Option<net.TcpStream>> =
+                            ok(none)
+                        match self.listener {
+                            some(bound) => {
+                                accepted = bound.try_accept()
+                            }
+                            none => {}
+                        }
                         match accepted {
                             err(problem) => {
                                 failed_message = problem.msg
@@ -708,9 +805,11 @@ pub unique class WebServer {
                     if accepting &&
                        active < self.options.max_connections &&
                        !listener_waiting {
-                        children.start(listener_ready(
-                            self.listener.poll_handle()))
-                        listener_waiting = true
+                        let rearmed: int = self.listener_handle()
+                        if rearmed >= 0 {
+                            children.start(listener_ready(rearmed))
+                            listener_waiting = true
+                        }
                     }
                 }
                 stopping => {
@@ -730,6 +829,62 @@ pub unique class WebServer {
                     active = 0
                     break
                 }
+                pulse => {
+                    if self.options.wake_guard_ms > 0 &&
+                       (accepting || active > 0) {
+                        children.start(wake_pulse(
+                            self.options.wake_guard_ms))
+                    }
+                }
+                intake_wake => {
+                    if accepting {
+                        for active < self.options.max_connections {
+                            var taken: Option<net.TcpStream> =
+                                self.intake_source().try_receive()
+                            if taken.is_none() { break }
+                            let stream: net.TcpStream =
+                                (move taken).expect("adopted stream")
+                            var peer: Option<net.Address> = none
+                            var ready: bool = true
+                            match stream.set_nonblocking(true) {
+                                ok(_) => {}
+                                err(_) => { ready = false }
+                            }
+                            let ignored_nodelay: Result<bool> =
+                                stream.set_nodelay(true)
+                            if ready {
+                                match stream.peer_address() {
+                                    ok(address) => {
+                                        peer = some(address)
+                                    }
+                                    err(_) => {}
+                                }
+                            }
+                            if peer.is_none() {
+                                stats.connection_errors += 1
+                                let ignored: Result<bool> =
+                                    stream.close()
+                                continue
+                            }
+                            stats.accepted += 1
+                            active += 1
+                            if active > stats.active_peak {
+                                stats.active_peak = active
+                            }
+                            children.start(serve_connection(
+                                move stream,
+                                (move peer).expect("peer address"),
+                                self.app, self.options, stats))
+                        }
+                        if self.intake_wake.is_some() {
+                            children.start(intake_pulse(
+                                self.intake_nudges()))
+                        }
+                    }
+                }
+                intake_closed => {
+                    accepting = false
+                }
                 connection(report) => {
                     active -= 1
                     if report.failed {
@@ -738,9 +893,15 @@ pub unique class WebServer {
                     if accepting &&
                        active < self.options.max_connections &&
                        !listener_waiting {
-                        children.start(listener_ready(
-                            self.listener.poll_handle()))
-                        listener_waiting = true
+                        let refreshed: int = self.listener_handle()
+                        if refreshed >= 0 {
+                            children.start(listener_ready(refreshed))
+                            listener_waiting = true
+                        }
+                    }
+                    if accepting && self.intake_wake.is_some() {
+                        let nudged: bool =
+                            self.intake_nudges().try_send(true)
                     }
                 }
             }

@@ -77,33 +77,16 @@ fn make_worker_app(
     }
 }
 
-fn bind_worker_listener(
-        host: string,
-        port: int,
-        backlog: int,
-        controls: Channel<Result<ServerControl>>) -> Result<net.TcpListener> {
-    let bound: Result<net.TcpListener> =
-        net.TcpListener.bind_reuse_port_with_backlog(host, port, backlog)
-    match bound {
-        err(problem) => {
-            controls.send(err(problem.msg, problem.kind))
-            return err(problem.msg, problem.kind)
-        }
-        ok(_) => {}
-    }
-    return ok((move bound).expect("worker listener"))
-}
-
 fn build_worker_server(
         app: WebApplication,
         host: string,
         port: int,
         limits: WorkerLimits,
+        streams: Channel<net.TcpStream>,
+        wake: Channel<bool>,
         controls: Channel<Result<ServerControl>>) -> Result<WebServer> {
-    let listener: net.TcpListener =
-        bind_worker_listener(host, port, limits.backlog, controls)?
-    let adopted: Result<WebServer> = WebServer.adopt(
-        app, limits.to_options(host, port), move listener)
+    let adopted: Result<WebServer> = WebServer.adopt_intake(
+        app, limits.to_options(host, port), streams, wake)
     match adopted {
         err(problem) => {
             controls.send(err(problem.msg, problem.kind))
@@ -118,6 +101,8 @@ fn spawn_worker(
         host: string,
         port: int,
         limits: WorkerLimits,
+        streams: Channel<net.TcpStream>,
+        wake: Channel<bool>,
         controls: Channel<Result<ServerControl>>,
         finished: Channel<Result<bool>>,
         finished_signal: Atomic<bool>,
@@ -129,7 +114,7 @@ fn spawn_worker(
             let app: WebApplication =
                 make_worker_app(factory, controls)?
             let server: WebServer = build_worker_server(
-                app, host, port, limits, controls)?
+                app, host, port, limits, streams, wake, controls)?
             let control: ServerControl = server.control()
             controls.send(ok(control))
             if shutdown.load(MemoryOrder.acquire) {
@@ -245,8 +230,9 @@ fn spawn_serve_cleanup(
 /// CPU-bound application on its target platform.
 pub fn recommended_workers() -> int { return 1 }
 
-/// Runs one async server per factory. With several factories, workers bind
-/// the same port through SO_REUSEPORT and keep independent app/service graphs.
+/// Runs one async server per factory. With several factories, one acceptor
+/// thread owns the listening socket and deals connections round-robin into
+/// per-worker intake channels; workers keep independent app/service graphs.
 pub async fn serve(
         options: ServerOptions,
         move factories: List<send fn() -> Result<WebApplication>>) -> Result<bool> {
@@ -266,10 +252,15 @@ pub async fn serve(
 
     let count: int = factories.len()
     let limits: WorkerLimits = worker_limits(options)
-    let first: net.TcpListener = net.TcpListener.bind_reuse_port_with_backlog(
-        options.host, options.port, options.backlog)?
-    let port: int = first.port()?
-    first.close()?
+    // One real listener, owned by a plain acceptor thread. SO_REUSEPORT
+    // does not balance connections on macOS — every stream lands on one
+    // listener — so the acceptor deals them round-robin into bounded
+    // per-worker channels instead; a full worker back-pressures the
+    // acceptor rather than dropping.
+    let acceptor_listener: net.TcpListener =
+        net.TcpListener.bind_with_backlog(
+            options.host, options.port, options.backlog)?
+    let port: int = acceptor_listener.port()?
 
     let shutdown: Atomic<bool> = new Atomic<bool>(false)
     let controls: Channel<Result<ServerControl>> = new Channel(count)
@@ -277,18 +268,32 @@ pub async fn serve(
     let finished_signal: Atomic<bool> = new Atomic<bool>(false)
     let ready: Channel<Result<bool>> = new Channel(1)
     let done: Channel<Result<bool>> = new Channel(1)
+    var intakes: List<Channel<net.TcpStream>> = []
+    var wakes: List<Channel<bool>> = []
+    for index: int in 0..count {
+        let intake: Channel<net.TcpStream> = new Channel(128)
+        let wake: Channel<bool> = new Channel(1)
+        intakes.push(intake)
+        wakes.push(wake)
+    }
     var workers: List<Thread<Result<bool>>> = []
     for index: int in 0..count {
         let factory: send fn() -> Result<WebApplication> =
             factories.pop().expect("worker factory")
         workers.push(spawn_worker(
-            options.host, port, limits,
+            options.host, port, limits, intakes[index], wakes[index],
             controls, finished, finished_signal, shutdown, move factory))
     }
+    let acceptor: Thread<bool> = spawn_acceptor(
+        move acceptor_listener, count, shutdown,
+        move intakes, move wakes)
 
     let cleanup: Thread<bool> = spawn_serve_cleanup(
         move workers, controls, finished, finished_signal,
         shutdown, ready, done, count)
+    // defers run newest first: the store lands before the poke wakes
+    // the blocking accept to observe it
+    defer poke_acceptor(options.host, port)
     defer shutdown.store(true, MemoryOrder.release)
 
     match await ready.receive_async() {
@@ -304,5 +309,47 @@ pub async fn serve(
     if !cleanup.join() {
         return err("the serve cleanup returned failure", "worker")
     }
+    poke_acceptor(options.host, port)
+    let acceptor_done: bool = acceptor.join()
     return result
+}
+
+/// A blocking accept cannot watch the shutdown flag, so stopping pokes
+/// the listener with one throwaway connection to wake it.
+fn poke_acceptor(host: string, port: int) {
+    match net.TcpStream.connect(host, port) {
+        ok(poke) => {
+            let ignored: Result<bool> = poke.close()
+        }
+        err(_) => {}
+    }
+}
+
+fn spawn_acceptor(
+        move listener: net.TcpListener,
+        count: int,
+        shutdown: Atomic<bool>,
+        move intakes: List<Channel<net.TcpStream>>,
+        move wakes: List<Channel<bool>>) -> Thread<bool> {
+    return thread.spawn(
+        fn() move(listener, intakes, wakes) -> bool {
+            var turn: int = 0
+            for !shutdown.load(MemoryOrder.acquire) {
+                var accepted: Result<net.TcpStream> = listener.accept()
+                if !accepted.is_ok() { break }
+                if shutdown.load(MemoryOrder.acquire) { break }
+                let stream: net.TcpStream =
+                    (move accepted).expect("accepted stream")
+                intakes[turn].send(move stream)
+                let nudged: bool = wakes[turn].try_send(true)
+                turn += 1
+                if turn >= count { turn = 0 }
+            }
+            let closed: Result<bool> = listener.close()
+            for index: int in 0..count {
+                intakes[index].close()
+                wakes[index].close()
+            }
+            return true
+        })
 }
