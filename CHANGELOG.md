@@ -20,6 +20,8 @@ Breaking async-v2 migration.
 - Async `WebServer.run`, `serve`, and TestHost request methods.
 - Structured TaskGroup ownership for accepted connections, async socket
   readiness, timers, shutdown Event, and request deadlines.
+- A repeatable release benchmark records five-sample JSON/TSV and enforces
+  same-machine throughput, p99, CPU/request, and variance gates.
 
 ### Changed
 

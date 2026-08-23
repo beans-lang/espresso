@@ -217,6 +217,35 @@ including zero. On `ServerOptions`, zero leaves the new field unset; the
 effective default remains 30 seconds, and any positive new value wins over
 the deprecated field.
 
+## Release gates
+
+The release benchmark builds with `--release --lto`, warms each lane, and
+records exactly five samples. Point it at the Beans checkout and compiler used
+for both revisions:
+
+```sh
+BEANS_ROOT=/path/to/beans \
+BEANSC=/path/to/beans/build/beansc \
+ESPRESSO_ROOT=/path/to/espresso-origin-main \
+./bench.sh record origin-main.json origin-main.tsv
+
+BEANS_ROOT=/path/to/beans \
+BEANSC=/path/to/beans/build/beansc \
+./bench.sh compare origin-main.json candidate.json candidate.tsv
+```
+
+Record mode uses legacy programs with origin/main's sync `app.get`, TestHost,
+and server calls. That one old TestHost rate is the baseline for both the new
+sync and no-await async lanes. Compare mode uses the async-v2 programs in this
+checkout. `ESPRESSO_ROOT` selects the old checkout only for the record command.
+JSON carries the settings, all samples, medians and coefficients of variation;
+TSV is the raw machine-readable sample table. The compare refuses a baseline
+from a different machine, compiler or build setting. Every series must have a
+coefficient of variation at most 5%. Against the supplied origin/main median,
+sync TestHost throughput must stay at least 0.90x, a no-await async route at
+least 0.80x, and live server throughput at least 0.85x. Live p99 may grow at
+most 1.25x and CPU per request at most 1.20x.
+
 ## Versioning
 
 This is Espresso 0.3.0. It is a breaking async-v2 migration: handlers,

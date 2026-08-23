@@ -1,0 +1,41 @@
+package main
+
+import espresso
+import std.io
+import std.time
+
+fn handler(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text("ok")
+}
+
+fn requests_per_second(host: espresso.TestHost,
+                       count: int) -> Result<int> {
+    let started: int = time.monotonic_nanos()
+    var checksum: int = 0
+    for index: int in 0..count {
+        let response: espresso.TestResponse = host.get("/sync")?
+        checksum += response.status + response.body.len()
+    }
+    if checksum == 0 { return err("empty benchmark checksum", "bench") }
+    let elapsed: int = time.monotonic_nanos() - started
+    if elapsed <= 0 { return err("empty benchmark duration", "bench") }
+    return ok(count * 1000000000 / elapsed)
+}
+
+fn main() {
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build().expect("app")
+    app.get("/sync", handler).expect("route")
+    let host: espresso.TestHost = new espresso.TestHost(app)
+    // Match the candidate's two 5,000-request warmup lanes.
+    for index: int in 0..10000 {
+        host.get("/sync").expect("warmup")
+    }
+    let rate: int = requests_per_second(host, 100000).expect("sample")
+    // Async routes did not exist in the old surface. Both gates compare with
+    // the same pre-migration synchronous TestHost lane.
+    io.println("sync_testhost_rps\trequests_per_second\t{rate}")
+    io.println("async_no_await_rps\trequests_per_second\t{rate}")
+    host.close().expect("close")
+}
