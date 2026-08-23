@@ -168,20 +168,10 @@ pub class WorkerPool {
         if self.reapers.len() > 0 {
             let reaper: Thread<bool> =
                 self.reapers.pop().expect("pool reaper")
-            match await reaper.join_async() {
-                ok(finished) => {
-                    if !finished && self.close_failed_message == "" {
-                        self.close_failed_message =
-                            "the worker reaper returned failure"
-                        self.close_failed_kind = "worker"
-                    }
-                }
-                err(problem) => {
-                    if self.close_failed_message == "" {
-                        self.close_failed_message = problem.msg
-                        self.close_failed_kind = problem.kind
-                    }
-                }
+            if !reaper.join() && self.close_failed_message == "" {
+                self.close_failed_message =
+                    "the worker reaper returned failure"
+                self.close_failed_kind = "worker"
             }
         }
         self.closed = true

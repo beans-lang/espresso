@@ -11,6 +11,21 @@ class PipelineTrace {
     pub fn init() {}
 }
 
+class ScopedDrop {
+    dropped: Atomic<int>
+
+    fn init(dropped: Atomic<int>) { self.dropped = dropped }
+
+    fn deinit() { self.dropped.fetch_add(1, MemoryOrder.relaxed) }
+}
+
+async fn canceled_request(host: espresso.TestHost) -> bool {
+    match await host.get("/cancel-scope") {
+        ok(_) => { return false }
+        err(_) => { return false }
+    }
+}
+
 @espresso.controller(route: "/mixed")
 pub class MixedController extends espresso.Controller {
     pub fn init() {}
@@ -50,8 +65,16 @@ async fn main() {
     let logger: log.Logger = log.Logger.create(
         "async-pipeline", [exported.sink()]).expect("logger")
     let trace: PipelineTrace = new PipelineTrace()
+    let scope_started: Channel<bool> = new Channel(1)
+    let scope_parked: aio.Event = new aio.Event()
+    let scoped_drops: Atomic<int> = new Atomic<int>(0)
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
+    espresso.add_scoped_factory<ScopedDrop>(
+        builder.services,
+        fn(provider: espresso.ServiceProvider) -> Result<ScopedDrop> {
+            return ok(new ScopedDrop(scoped_drops))
+        }).expect("scoped drop")
     espresso.add_controllers(builder).expect("controllers")
     let app: espresso.WebApplication = builder.build().expect("app")
     app.use_middleware(new espresso.RequestLog(logger)).expect("request log")
@@ -82,6 +105,14 @@ async fn main() {
     espresso.map_controllers(app).expect("map controllers")
     app.get("/broken", broken).expect("broken route")
     app.get_sync("/unfinished", unfinished).expect("unfinished route")
+    app.get("/cancel-scope", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        let held: ScopedDrop =
+            context.services.resolve<ScopedDrop>()?
+        scope_started.send(true)
+        await scope_parked.wait()
+        return espresso.text("unexpected")
+    }).expect("cancel scope route")
 
     let host: espresso.TestHost = new espresso.TestHost(app)
     let sync_response: espresso.TestResponse =
@@ -114,5 +145,13 @@ async fn main() {
         "middleware {trace.entries.join(",")} response {short_response.status}:{short_response.text()}")
     io.println(
         "errors {broken_response.status} logged {broken_log_status} detached {unfinished_response.status}")
+
+    let canceled: aio.TaskGroup<bool> = new aio.TaskGroup<bool>()
+    canceled.start(canceled_request(host))
+    let ignored_canceled: Option<bool> = canceled.try_next()
+    (await scope_started.receive_async()).expect("scope started")
+    canceled.cancel_all()
+    io.println(
+        "scope canceled dropped {scoped_drops.load(MemoryOrder.relaxed)}")
     host.close().expect("close")
 }

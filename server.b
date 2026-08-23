@@ -612,6 +612,7 @@ pub unique class WebServer {
         if !self.resources_live {
             return err("the server is closed", "closed")
         }
+        defer self.close_resources()
         let stats: ServerStats = new ServerStats()
         let children: aio.TaskGroup<ServerEvent> =
             new aio.TaskGroup<ServerEvent>()
@@ -746,7 +747,6 @@ pub unique class WebServer {
         }
 
         children.cancel_all()
-        self.close_resources()
         if failed_message != "" {
             return err(failed_message, failed_kind)
         }

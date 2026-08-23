@@ -7,6 +7,28 @@ import std.net
 import std.thread
 import std.time
 
+class ServerDrop {
+    dropped: Atomic<int>
+
+    fn init(dropped: Atomic<int>) { self.dropped = dropped }
+
+    fn deinit() { self.dropped.fetch_add(1, MemoryOrder.relaxed) }
+}
+
+async fn run_owned(move server: espresso.WebServer,
+                   started: Channel<bool>) -> bool {
+    started.send(true)
+    match await server.run() {
+        ok(_) => { return true }
+        err(_) => { return false }
+    }
+}
+
+fn instantiate_server_drop(app: espresso.WebApplication) -> Result<bool> {
+    let held: ServerDrop = app.services.resolve<ServerDrop>()?
+    return ok(true)
+}
+
 fn request(port: int, target: string) -> string {
     let stream: net.TcpStream = net.TcpStream.connect_timeout(
         "127.0.0.1", port, 3000).expect("connect")
@@ -238,6 +260,39 @@ async fn partial_timeout() -> Result<bool> {
     return await client.join_async()
 }
 
+async fn canceled_run() -> Result<string> {
+    let dropped: Atomic<int> = new Atomic<int>(0)
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    espresso.add_singleton_factory<ServerDrop>(
+        builder.services,
+        fn(provider: espresso.ServiceProvider) -> Result<ServerDrop> {
+            return ok(new ServerDrop(dropped))
+        })?
+    let app: espresso.WebApplication = builder.build()?
+    instantiate_server_drop(app)?
+    let options: espresso.ServerOptions = new espresso.ServerOptions()
+    options.port = 0
+    let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
+    let port: int = server.port()?
+    let started: Channel<bool> = new Channel(1)
+    let running: aio.TaskGroup<bool> = new aio.TaskGroup<bool>()
+    running.start(run_owned(move server, started))
+    let ignored_running: Option<bool> = running.try_next()
+    (await started.receive_async()).expect("run started")
+    running.cancel_all()
+
+    var refused: bool = false
+    match net.TcpStream.connect_timeout("127.0.0.1", port, 100) {
+        ok(unwanted) => {
+            let ignored_close: Result<bool> = unwanted.close()
+        }
+        err(_) => { refused = true }
+    }
+    return ok(
+        "refused {refused} dropped {dropped.load(MemoryOrder.relaxed)}")
+}
+
 async fn main() {
     (await isolation()).expect("isolation")
     (await graceful_completion()).expect("grace")
@@ -247,4 +302,5 @@ async fn main() {
     let new_wins: int = (await timeout_case(150, 25, 75)).expect("new timeout")
     io.println("timeouts old {old_only} new {new_wins}")
     io.println("partial timeout {(await partial_timeout()).expect("partial")}")
+    io.println("cancel run {(await canceled_run()).expect("cancel run")}")
 }

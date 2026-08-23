@@ -4,3 +4,4 @@ forced canceled true closed true responses 0
 pre-stopped accepted 0
 timeouts old 503 new 200
 partial timeout true
+cancel run refused true dropped 1

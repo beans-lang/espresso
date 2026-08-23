@@ -199,6 +199,12 @@ pub class WebApplication {
                         remote: net.Address) -> Result<HttpContext> {
         if self.closed { return err("the application is closed", "closed") }
         let context: HttpContext = self.new_context(remote)
+        var handed_off: bool = false
+        defer {
+            if !handed_off {
+                let ignored: Result<bool> = context.close()
+            }
+        }
         self.begin_request(context, served.head)?
         context.request.body.append(served.body)
         context.request.keep_alive = served.keep_alive
@@ -206,6 +212,7 @@ pub class WebApplication {
             context.request.trailer_fields = served.trailer_fields
         }
         await self.handle_context(context)?
+        handed_off = true
         return ok(context)
     }
 
