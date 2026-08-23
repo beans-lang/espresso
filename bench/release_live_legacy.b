@@ -62,7 +62,7 @@ fn main() {
         return live_client(port, control)
     })
     let ignored_stats: espresso.ServerStats = server.run().expect("run")
-    let sample: LiveSample = client.join().expect("client")
+    let sample: LiveSample = client.join()
     io.println("live_rps\trequests_per_second\t{sample.rate}")
     io.println("live_p99_nanos\tnanoseconds\t{sample.p99_nanos}")
     io.println("live_cpu_requests\trequests\t{sample.cpu_requests}")

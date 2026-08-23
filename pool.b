@@ -21,14 +21,9 @@ fn spawn_pool_reaper(move workers: List<Thread<bool>>,
         var failed_kind: string = ""
         for workers.len() > 0 {
             let worker: Thread<bool> = workers.pop().expect("pool thread")
-            match worker.join() {
-                ok(_) => {}
-                err(problem) => {
-                    if failed_message == "" {
-                        failed_message = problem.msg
-                        failed_kind = problem.kind
-                    }
-                }
+            if !worker.join() && failed_message == "" {
+                failed_message = "a worker returned failure while closing"
+                failed_kind = "worker"
             }
         }
         if failed_message == "" {
@@ -173,8 +168,14 @@ pub class WorkerPool {
         if self.reapers.len() > 0 {
             let reaper: Thread<bool> =
                 self.reapers.pop().expect("pool reaper")
-            match reaper.join() {
-                ok(_) => {}
+            match await reaper.join_async() {
+                ok(finished) => {
+                    if !finished && self.close_failed_message == "" {
+                        self.close_failed_message =
+                            "the worker reaper returned failure"
+                        self.close_failed_kind = "worker"
+                    }
+                }
                 err(problem) => {
                     if self.close_failed_message == "" {
                         self.close_failed_message = problem.msg
