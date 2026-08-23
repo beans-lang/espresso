@@ -1,6 +1,7 @@
 package main
 
 import espresso
+import std.async as aio
 import std.io
 import std.net
 import std.thread
@@ -11,7 +12,7 @@ fn fast(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
 }
 
 fn client(port: int, control: espresso.ServerControl) -> string {
-    // One pipelined burst: two deferred requests sit between two synchronous
+    // One pipelined burst: two async requests sit between two synchronous
     // ones, and every response must come back in request order.
     var burst: string = "burst-broken"
     match net.TcpStream.connect_timeout("127.0.0.1", port, 3000) {
@@ -42,8 +43,7 @@ fn client(port: int, control: espresso.ServerControl) -> string {
         }
     }
 
-    // A handler that never answers: the pending timeout must reply 503 and
-    // close, and the responder that fires later must vanish without effect.
+    // A handler beyond the request deadline must reply 503 and close.
     match net.TcpStream.connect_timeout("127.0.0.1", port, 3000) {
         ok(second) => {
             match second.write_text(
@@ -59,9 +59,6 @@ fn client(port: int, control: espresso.ServerControl) -> string {
             let timed: bool =
                 reply.contains("503 Service Unavailable") &&
                 reply.contains("timed out")
-            // Give the late responder time to fire against the still-running
-            // server before stopping it.
-            time.sleep_millis(900)
             let stopped: bool = control.stop().or(false)
             return "{burst} timeout {timed} stopped {stopped}"
         }
@@ -72,43 +69,37 @@ fn client(port: int, control: espresso.ServerControl) -> string {
     }
 }
 
-fn main() {
+async fn main() {
     let pool: espresso.WorkerPool =
         espresso.WorkerPool.start(2).expect("pool")
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
-    app.get("/fast", fast).expect("route")
-    app.get("/slow", fn(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
-        let responder: espresso.Responder = context.respond_later()?
-        pool.submit(fn() move(responder) {
+    app.get_sync("/fast", fast).expect("route")
+    app.get("/slow", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        let body: string = await pool.execute(send fn() -> string {
             time.sleep_millis(50)
-            let sent: Result<bool> = responder.text(200, "OK", "slow")
+            return "slow"
         })?
-        return espresso.detached()
+        return espresso.text(body)
     }).expect("route")
-    app.get("/twice", fn(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
-        let responder: espresso.Responder = context.respond_later()?
-        pool.submit(fn() move(responder) {
-            let first: Result<bool> = responder.text(200, "OK", "one")
-            // The second send must be refused by the one-shot flag.
-            let refused: Result<bool> = responder.text(200, "OK", "two")
+    app.get("/twice", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        let body: string = await pool.execute(send fn() -> string {
+            return "one"
         })?
-        return espresso.detached()
+        return espresso.text(body)
     }).expect("route")
-    app.get("/drop", fn(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
-        let responder: espresso.Responder = context.respond_later()?
-        pool.submit(fn() move(responder) {
-            time.sleep_millis(900)
-            let late: Result<bool> = responder.text(200, "OK", "late")
-        })?
-        return espresso.detached()
+    app.get("/drop", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        await aio.sleep_millis(900)
+        return espresso.text("late")
     }).expect("route")
 
     let options: espresso.ServerOptions = new espresso.ServerOptions()
     options.port = 0
-    options.poll_timeout_ms = 100
-    options.pending_timeout_ms = 200
+    options.request_timeout_ms = 200
     let server: espresso.WebServer =
         espresso.WebServer.bind(app, options).expect("server")
     let port: int = server.port().expect("port")
@@ -116,8 +107,8 @@ fn main() {
     let visitor: Thread<string> = thread.spawn(fn() -> string {
         return client(port, control)
     })
-    let stats: espresso.ServerStats = server.run().expect("run")
-    io.println(visitor.join())
+    let stats: espresso.ServerStats = (await server.run()).expect("run")
+    io.println((await visitor.join_async()).expect("visitor"))
     io.println("accepted {stats.accepted} requests {stats.requests} responses {stats.responses} errors {stats.connection_errors}")
-    pool.close().expect("pool close")
+    (await pool.close()).expect("pool close")
 }

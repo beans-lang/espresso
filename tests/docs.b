@@ -88,7 +88,7 @@ fn plain(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     return espresso.text("plain")
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
 
@@ -118,8 +118,8 @@ fn main() {
     app.use_middleware(new espresso.RequestLog(logger)).expect("log")
 
     espresso.map_controllers(app).expect("map")
-    app.get("/plain", plain).expect("plain")
-    app.get("/page", fn(context: espresso.HttpContext) ->
+    app.get_sync("/plain", plain).expect("plain")
+    app.get_sync("/page", fn(context: espresso.HttpContext) ->
         Result<espresso.ActionResult> {
         return espresso.view_model(
             "hello", json.parse("\{\"title\":\"Docs\"\}").expect("model"))
@@ -127,23 +127,30 @@ fn main() {
     espresso.map_openapi(app).expect("openapi")
 
     let host: espresso.TestHost = new espresso.TestHost(app)
-    io.println("hello {host.get("/hello/Beans").expect("hello").text()}")
+    let hello_response: espresso.TestResponse =
+        (await host.get("/hello/Beans")).expect("hello")
+    io.println("hello {hello_response.text()}")
 
     let headers: http.Headers = new http.Headers()
     headers.add("Content-Type", "application/json")
     headers.add("User-Agent", "docs-test")
-    let note: espresso.TestResponse = host.send_with_headers(
+    let note: espresso.TestResponse = (await host.send_with_headers(
         "POST", "/notes/9?style=fancy", headers,
-        "\{\"text\":\"remember\"\}").expect("note")
+        "\{\"text\":\"remember\"\}")).expect("note")
     io.println("note {note.status} [{note.text()}]")
-    let invalid: espresso.TestResponse = host.send_with_headers(
-        "POST", "/notes/9", headers, "\{\"text\":\"\"\}").expect("bad note")
+    let invalid: espresso.TestResponse = (await host.send_with_headers(
+        "POST", "/notes/9", headers, "\{\"text\":\"\"\}")).expect("bad note")
     io.println("invalid {invalid.status} {invalid.text().contains("\"errors\"")}")
 
-    io.println("plain {host.get("/plain").expect("plain").text()}")
-    let page: espresso.TestResponse = host.get("/page").expect("page")
+    let plain_response: espresso.TestResponse =
+        (await host.get("/plain")).expect("plain")
+    io.println("plain {plain_response.text()}")
+    let page: espresso.TestResponse =
+        (await host.get("/page")).expect("page")
     io.println("page {page.status} [{page.text()}]")
-    io.println("openapi {host.get("/openapi.json").expect("spec").status}")
+    let spec: espresso.TestResponse =
+        (await host.get("/openapi.json")).expect("spec")
+    io.println("openapi {spec.status}")
 
     // resolve<T> from a request scope
     let scope: espresso.ServiceProvider =

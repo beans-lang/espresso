@@ -14,13 +14,13 @@ pub class HelloController extends espresso.Controller {
     pub fn init() {}
 
     @espresso.get(route: "/\{name\}")
-    pub fn hello(@espresso.route name: string) ->
+    pub async fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text("Hello, {name}!")
     }
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     espresso.add_controllers(builder).expect("controllers")
@@ -29,7 +29,7 @@ fn main() {
 
     let server: espresso.WebServer = espresso.WebServer.bind(
         app, new espresso.ServerOptions()).expect("bind")
-    server.run().expect("run")
+    (await server.run()).expect("run")
 }
 ```
 
@@ -52,14 +52,15 @@ helpers — `self.ok(json)`, `self.ok_text(text)`, `self.created(json)`,
 rare action that wants the raw request. A class with action annotations
 and no base class is still a controller.
 
-Actions return `Result<espresso.ActionResult>`. An ActionResult is a
-value describing the response; the router executes it after the action
-returns. The implementations are `TextResult`, `JsonResult`,
+Actions may be sync or async and return `Result<espresso.ActionResult>`.
+An ActionResult is a value describing the response; the router executes
+it after the action returns. The implementations are `TextResult`, `JsonResult`,
 `JsonTextResult`, `NoContentResult`, `StatusResult`, `ProblemResult`,
 `BytesResult`, `HtmlResult`, `ViewResult` and `DetachedResult`, with
 free constructors for handlers that are not controller methods:
 `espresso.text(...)`, `espresso.json_text(...)`, `espresso.status(...)`,
 `espresso.problem(...)`, `espresso.view(...)`, `espresso.detached()`.
+`DetachedResult` is only for a response already filled by hand.
 
 ## Model binding
 
@@ -166,8 +167,8 @@ app.use(espresso.security_headers)?
 app.use_middleware(new espresso.RequestLog(logger))?
 ```
 
-`espresso.Middleware` is one method:
-`handle(context, next) -> Result<bool>`. The built-ins cover CORS
+`espresso.Middleware` is one async method:
+`async handle(context, next) -> Result<bool>`. The built-ins cover CORS
 (`espresso.cors`), security headers, API keys (`espresso.api_key`) and
 a whole-app rate limit (`espresso.fixed_window_rate_limit`).
 
@@ -196,24 +197,28 @@ espresso.add_views(builder, views)?
 ## The server
 
 `espresso.WebServer.bind(app, options)` serves plain HTTP/1.1 with
-keep-alive and pipelining; `serve_workers` scales over cores with
-SO_REUSEPORT. `context.respond_later()` hands a move-only `Responder`
-to any thread for deferred responses — return `espresso.detached()`
-from the handler. `espresso.TestHost` runs the full pipeline in memory
-for tests, and `espresso.map_openapi(app)` serves the route table as
-OpenAPI 3.1.
+keep-alive and pipelining; `serve` scales over cores with
+SO_REUSEPORT. `run`, `serve`, and `TestHost` request methods are async.
+Each connection is a structured child of the server run. Async route
+handlers are the default; `get_sync`, `post_sync`, `map_sync`, and the
+other verb `_sync` forms keep small synchronous handlers on the direct
+inline path. `WorkerPool.execute` runs blocking work on its fixed crew
+and asynchronously returns the value. `espresso.map_openapi(app)` serves
+the route table as OpenAPI 3.1.
 
 ## Configuration
 
 `espresso.Configuration` layers defaults, files and `--key=value`
 arguments; `espresso.configure_server` fills `ServerOptions` from the
-`server:` section.
+`server:` section. `server:request-timeout-ms` bounds the full request
+pipeline. The old `server:pending-timeout-ms` name is accepted for the
+0.3 release only.
 
 ## Versioning
 
-This is Espresso 0.2.0, one breaking release over 0.1: handlers return
-`ActionResult` instead of writing the response, registration is
-generic instead of `type_of` pairs, `ServiceKey` is gone, logging moved
-to `std.log`, and the binding and filter annotations are new. It needs
-Beans 0.1.29 for explicit type arguments, package function values, and
-the reflection speed that makes controllers a first-class path.
+This is Espresso 0.3.0. It is a breaking async-v2 migration: handlers,
+middleware, authorization, the request pipeline, server entry points,
+and TestHost request methods are async by default. Deferred responder
+and mailbox APIs are removed. It needs a Beans async-v2 compiler with
+stored async callables, TaskGroup, async Event/timers/channels/threads,
+and async reflection calls.

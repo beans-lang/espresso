@@ -36,8 +36,8 @@ pub class WebApplication {
     pub services: ServiceProvider
     options: AppOptions
     router: Router = new Router()
-    middleware: List<fn(HttpContext,
-        fn(HttpContext) -> Result<bool>) -> Result<bool>> = []
+    middleware: List<async fn(HttpContext,
+        async fn(HttpContext) -> Result<bool>) -> Result<bool>> = []
     trace_sequence: int = 0
     closed: bool = false
 
@@ -47,8 +47,8 @@ pub class WebApplication {
     }
 
     /// Adds middleware in outer-to-inner order.
-    pub fn use(layer: fn(HttpContext,
-        fn(HttpContext) -> Result<bool>) -> Result<bool>) -> Result<bool> {
+    pub fn use(layer: async fn(HttpContext,
+        async fn(HttpContext) -> Result<bool>) -> Result<bool>) -> Result<bool> {
         if self.closed { return err("the application is closed", "closed") }
         self.middleware.push(layer)
         return ok(true)
@@ -60,57 +60,90 @@ pub class WebApplication {
     pub fn use_middleware(layer: Middleware) -> Result<bool> {
         if self.closed { return err("the application is closed", "closed") }
         self.middleware.push(
-            fn(context: HttpContext,
-               next: fn(HttpContext) -> Result<bool>) -> Result<bool> {
-                return layer.handle(context, next)
+            async fn(context: HttpContext,
+               next: async fn(HttpContext) -> Result<bool>) -> Result<bool> {
+                return await layer.handle(context, next)
             })
         return ok(true)
     }
 
     pub fn map(method: string,
                pattern: string,
-               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+               handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         if self.closed { return err("the application is closed", "closed") }
         return self.router.map(method, pattern, handler)
     }
 
     pub fn get(pattern: string,
-               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+               handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("GET", pattern, handler)
     }
 
     pub fn post(pattern: string,
-                handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+                handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("POST", pattern, handler)
     }
 
     pub fn put(pattern: string,
-               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+               handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PUT", pattern, handler)
     }
 
     pub fn patch(pattern: string,
-                 handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+                 handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PATCH", pattern, handler)
     }
 
     pub fn delete(pattern: string,
-                  handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+                  handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("DELETE", pattern, handler)
     }
 
-    fn run_pipeline(context: HttpContext, index: int) -> Result<bool> {
+    /// Maps a synchronous handler and dispatches it inline.
+    pub fn map_sync(method: string,
+                    pattern: string,
+                    handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        return self.router.map_sync(method, pattern, handler)
+    }
+
+    pub fn get_sync(pattern: string,
+                    handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("GET", pattern, handler)
+    }
+
+    pub fn post_sync(pattern: string,
+                     handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("POST", pattern, handler)
+    }
+
+    pub fn put_sync(pattern: string,
+                    handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("PUT", pattern, handler)
+    }
+
+    pub fn patch_sync(pattern: string,
+                      handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("PATCH", pattern, handler)
+    }
+
+    pub fn delete_sync(pattern: string,
+                       handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("DELETE", pattern, handler)
+    }
+
+    async fn run_pipeline(context: HttpContext, index: int) -> Result<bool> {
         if index >= self.middleware.len() {
-            return self.router.dispatch(context)
+            return await self.router.dispatch(context)
         }
-        let layer: fn(HttpContext,
-            fn(HttpContext) -> Result<bool>) -> Result<bool> =
+        let layer: async fn(HttpContext,
+            async fn(HttpContext) -> Result<bool>) -> Result<bool> =
             self.middleware[index]
-        let next: fn(HttpContext) -> Result<bool> =
-            fn(inner: HttpContext) -> Result<bool> {
-                return self.run_pipeline(inner, index + 1)
+        let next: async fn(HttpContext) -> Result<bool> =
+            async fn(inner: HttpContext) -> Result<bool> {
+                return await self.run_pipeline(inner, index + 1)
             }
-        return layer(context, next)
+        return await layer(context, next)
     }
 
     /// One reusable per-connection context over the root provider.
@@ -129,10 +162,10 @@ pub class WebApplication {
     /// Runs the middleware pipeline and endpoint for the request currently
     /// held by `context`. The caller sends `context.response` afterwards and
     /// then calls `context.close()`.
-    fn handle_context(context: HttpContext) -> Result<bool> {
+    async fn handle_context(context: HttpContext) -> Result<bool> {
         if self.closed { return err("the application is closed", "closed") }
         context.open_scope()?
-        match self.run_pipeline(context, 0) {
+        match await self.run_pipeline(context, 0) {
             ok(_) => {}
             err(problem) => {
                 if problem.kind == "bad_request" &&
@@ -150,9 +183,6 @@ pub class WebApplication {
                 }
             }
         }
-        // A deferred request answers through its Responder; the buffered
-        // response object is never sent, so no defaults are stamped on it.
-        if context.deferred { return ok(true) }
         if !context.response.completed {
             context.response.no_content()
         }
@@ -163,14 +193,10 @@ pub class WebApplication {
         return ok(true)
     }
 
-    // Deferred responses come from worker threads without a context, so the
-    // server asks for the header it should stamp on them.
-    fn server_header() -> string { return self.options.server_header }
-
     /// Runs one already-parsed standard-library request through Espresso.
     /// The caller must close the returned context after sending its response.
-    pub fn handle(served: http.ServedRequest,
-                  remote: net.Address) -> Result<HttpContext> {
+    pub async fn handle(served: http.ServedRequest,
+                        remote: net.Address) -> Result<HttpContext> {
         if self.closed { return err("the application is closed", "closed") }
         let context: HttpContext = self.new_context(remote)
         self.begin_request(context, served.head)?
@@ -179,7 +205,7 @@ pub class WebApplication {
         if served.trailer_fields.count() != 0 {
             context.request.trailer_fields = served.trailer_fields
         }
-        self.handle_context(context)?
+        await self.handle_context(context)?
         return ok(context)
     }
 

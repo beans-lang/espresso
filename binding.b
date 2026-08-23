@@ -82,7 +82,7 @@ pub annotation limit {
 /// implementation as a service; requests under @auth answer 500 until
 /// one is registered, and 403 when it declines.
 pub interface Authorizer {
-    fn authorize(context: HttpContext, policy: string) -> Result<bool>
+    async fn authorize(context: HttpContext, policy: string) -> Result<bool>
 }
 
 // ---- results the filters answer with --------------------------------------
@@ -470,6 +470,7 @@ class ArgPlan {
 class ActionPlan {
     controller: reflect.Type
     action: reflect.Method
+    action_async: bool
     arguments: List<ArgPlan> = []
     attach_context: bool = false
     auth_policy: string = ""
@@ -485,6 +486,7 @@ class ActionPlan {
             binder: Binder) {
         self.controller = controller
         self.action = action
+        self.action_async = action.is_async()
         self.binder = binder
     }
 
@@ -499,7 +501,7 @@ class ActionPlan {
         return self.window_count > self.limit_rpm
     }
 
-    fn authorize(context: HttpContext) -> Result<Option<ActionResult>> {
+    async fn authorize(context: HttpContext) -> Result<Option<ActionResult>> {
         if !self.has_auth { return ok(none) }
         var boxed: Option<reflect.Value> = none
         match context.services.resolve_value(type_of(Authorizer)) {
@@ -512,7 +514,7 @@ class ActionPlan {
         }
         match boxed.expect("authorizer") as? Authorizer {
             some(authorizer) => {
-                if !authorizer.authorize(context, self.auth_policy)? {
+                if !await authorizer.authorize(context, self.auth_policy)? {
                     return ok(some(new ProblemResult(
                         403, "Forbidden",
                         "The request was not authorized.")))
@@ -602,12 +604,12 @@ class ActionPlan {
         return false
     }
 
-    fn run(context: HttpContext) -> Result<ActionResult> {
+    async fn run(context: HttpContext) -> Result<ActionResult> {
         if self.over_limit() {
             let limited: ActionResult = new RetryAfterResult(60)
             return ok(limited)
         }
-        match self.authorize(context)? {
+        match await self.authorize(context)? {
             some(refusal) => { return ok(refusal) }
             none => {}
         }
@@ -652,7 +654,13 @@ class ActionPlan {
             }
         }
         var returned: Option<reflect.Value> = none
-        match self.action.call(receiver, move arguments) {
+        let called: Result<reflect.Value, reflect.ReflectError> =
+            if self.action_async {
+                await self.action.call_async(receiver, move arguments)
+            } else {
+                self.action.call(receiver, move arguments)
+            }
+        match called {
             ok(value) => { returned = some(value) }
             err(problem) => {
                 return err(
@@ -744,10 +752,9 @@ fn build_action_plan(controller: reflect.Type,
                      marker: Option<reflect.Annotation>,
                      controller_filters: List<reflect.Annotation>,
                      binder: Binder) -> Result<ActionPlan> {
-    if !action.is_public() || action.is_static() ||
-       action.is_async() || action.is_generic() {
+    if !action.is_public() || action.is_static() || action.is_generic() {
         return err(
-            "controller action {action.name()} must be public, synchronous, instance, and non-generic",
+            "controller action {action.name()} must be public, instance, and non-generic",
             "controller")
     }
     if action.result_type().qualified_name() !=

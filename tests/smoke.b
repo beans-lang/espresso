@@ -37,7 +37,7 @@ fn live_client(port: int, control: espresso.ServerControl) -> bool {
     return response.contains("\r\n\r\nlive")
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     builder.services.singleton<SmokeGreeting>().expect("greeting")
@@ -46,19 +46,20 @@ fn main() {
     espresso.map_controllers(app).expect("controllers")
     espresso.map_openapi(app).expect("openapi")
     let host: espresso.TestHost = new espresso.TestHost(app)
-    let response: espresso.TestResponse = host.get(
-        "/api/hello/Ada").expect("controller")
+    let response: espresso.TestResponse = (await host.get(
+        "/api/hello/Ada")).expect("controller")
     io.println("smoke controller {response.status} {response.text()}")
-    io.println("smoke openapi {host.get("/openapi.json").expect("spec").text().contains("\"openapi\":\"3.1.0\"")}")
+    let spec: espresso.TestResponse =
+        (await host.get("/openapi.json")).expect("spec")
+    io.println("smoke openapi {spec.text().contains("\"openapi\":\"3.1.0\"")}")
     host.close().expect("host close")
 
     let live_builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let live_app: espresso.WebApplication = live_builder.build().expect("live app")
-    live_app.get("/", live_handler).expect("live route")
+    live_app.get_sync("/", live_handler).expect("live route")
     let options: espresso.ServerOptions = new espresso.ServerOptions()
     options.port = 0
-    options.poll_timeout_ms = 100
     let server: espresso.WebServer = espresso.WebServer.bind(
         live_app, options).expect("server")
     let port: int = server.port().expect("port")
@@ -66,6 +67,7 @@ fn main() {
     let client: Thread<bool> = thread.spawn(fn() -> bool {
         return live_client(port, control)
     })
-    let stats: espresso.ServerStats = server.run().expect("run")
-    io.println("smoke server {client.join()} {stats.responses}")
+    let stats: espresso.ServerStats = (await server.run()).expect("run")
+    let visited: bool = (await client.join_async()).expect("client")
+    io.println("smoke server {visited} {stats.responses}")
 }

@@ -142,7 +142,7 @@ fn route_for(chaos: Rand) -> string {
     return choices[chaos.next(choices.len())]
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     espresso.add_controllers(builder).expect("add")
@@ -161,16 +161,16 @@ fn main() {
         let lane: int = chaos.next(3)
         var status: int = 0
         if lane == 0 {
-            status = host.send_with_headers(
+            status = (await host.send_with_headers(
                 "POST", "/fuzz/payload", headers,
-                body_for(chaos)).expect("payload").status
+                body_for(chaos))).expect("payload").status
         } else if lane == 1 {
-            status = host.send_with_headers(
+            status = (await host.send_with_headers(
                 "POST", "/fuzz/nested", headers,
-                body_for(chaos)).expect("nested").status
+                body_for(chaos))).expect("nested").status
         } else {
-            status = host.get(
-                "/fuzz/typed/{route_for(chaos)}{query_for(chaos)}")
+            status = (await host.get(
+                "/fuzz/typed/{route_for(chaos)}{query_for(chaos)}"))
                 .expect("typed").status
         }
         if status == 200 { ok_count += 1 }
@@ -181,17 +181,19 @@ fn main() {
         "fuzz rounds 400 ok {ok_count} client-errors {client_error} unexpected {other}")
 
     // Well-formed requests round-trip exactly, fuzz aside.
-    let good: espresso.TestResponse = host.send_with_headers(
+    let good: espresso.TestResponse = (await host.send_with_headers(
         "POST", "/fuzz/payload", headers,
-        "\{\"name\":\"beans\",\"count\":3,\"ratio\":0.5,\"live\":true,\"tags\":[\"x\"],\"scores\":[9,8]\}")
-        .expect("good")
+        "\{\"name\":\"beans\",\"count\":3,\"ratio\":0.5,\"live\":true,\"tags\":[\"x\"],\"scores\":[9,8]\}")).expect("good")
     io.println("good {good.status} [{good.text()}]")
-    let nested: espresso.TestResponse = host.send_with_headers(
+    let nested: espresso.TestResponse = (await host.send_with_headers(
         "POST", "/fuzz/nested", headers,
-        "\{\"inner\":\{\"label\":\"deep\"\},\"depth\":2\}")
-        .expect("nested good")
+        "\{\"inner\":\{\"label\":\"deep\"\},\"depth\":2\}")).expect("nested good")
     io.println("nested {nested.status} [{nested.text()}]")
-    io.println("typed {host.get("/fuzz/typed/5?flag=true").expect("typed").text()}")
-    io.println("typed-default {host.get("/fuzz/typed/5").expect("typed2").text()}")
+    let typed: espresso.TestResponse =
+        (await host.get("/fuzz/typed/5?flag=true")).expect("typed")
+    let typed_default: espresso.TestResponse =
+        (await host.get("/fuzz/typed/5")).expect("typed2")
+    io.println("typed {typed.text()}")
+    io.println("typed-default {typed_default.text()}")
     host.close().expect("close")
 }

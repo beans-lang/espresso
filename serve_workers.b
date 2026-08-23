@@ -1,18 +1,17 @@
 package espresso
 
+import std.async as aio
 import std.net
-import std.poll
 import std.thread
 
-// Every option a worker needs after binding, flattened into Send scalars —
-// `ServerOptions` is a local class and never crosses a thread.
+// Every option a worker needs after binding, flattened into Send scalars.
 struct WorkerLimits {
     backlog: int
     max_connections: int
-    max_events: int
-    poll_timeout_ms: int
     idle_timeout_ms: int
     graceful_shutdown_ms: int
+    request_timeout_ms: int
+    pending_timeout_ms: int
     read_buffer_bytes: int
     max_body_bytes: int
     max_response_body_bytes: int
@@ -24,15 +23,15 @@ struct WorkerLimits {
     max_head_span_bytes: int
 
     fn to_options(host: string, port: int) -> ServerOptions {
-        var built: ServerOptions = new ServerOptions()
+        let built: ServerOptions = new ServerOptions()
         built.host = host
         built.port = port
         built.backlog = self.backlog
         built.max_connections = self.max_connections
-        built.max_events = self.max_events
-        built.poll_timeout_ms = self.poll_timeout_ms
         built.idle_timeout_ms = self.idle_timeout_ms
         built.graceful_shutdown_ms = self.graceful_shutdown_ms
+        built.request_timeout_ms = self.request_timeout_ms
+        built.pending_timeout_ms = self.pending_timeout_ms
         built.read_buffer_bytes = self.read_buffer_bytes
         built.max_body_bytes = self.max_body_bytes
         built.max_response_body_bytes = self.max_response_body_bytes
@@ -50,10 +49,10 @@ fn worker_limits(options: ServerOptions) -> WorkerLimits {
     return WorkerLimits {
         backlog: options.backlog,
         max_connections: options.max_connections,
-        max_events: options.max_events,
-        poll_timeout_ms: options.poll_timeout_ms,
         idle_timeout_ms: options.idle_timeout_ms,
         graceful_shutdown_ms: options.graceful_shutdown_ms,
+        request_timeout_ms: options.request_timeout_ms,
+        pending_timeout_ms: options.pending_timeout_ms,
         read_buffer_bytes: options.read_buffer_bytes,
         max_body_bytes: options.max_body_bytes,
         max_response_body_bytes: options.max_response_body_bytes,
@@ -66,69 +65,56 @@ fn worker_limits(options: ServerOptions) -> WorkerLimits {
     }
 }
 
-// One serving worker. It owns an event loop bound to a throwaway port and
-// receives its real connections from the acceptor through `intake`; the
-// acceptor learns the worker's stop-and-wake handle from `controls`.
-// Spawning lives in its own function so the closure moves function
-// parameters, which the checker allows where loop-locals are refused.
-// A control whose negative signal tells the acceptor this worker never
-// started; the acceptor then refuses the whole serve run.
-fn failed_control() -> ServerControl {
-    return ServerControl {
-        stopping: new Atomic<bool>(true),
-        signal: -1,
-    }
-}
-
 fn spawn_worker(
+        host: string,
+        port: int,
         limits: WorkerLimits,
-        intake: IntakeQueue,
-        controls: Channel<ServerControl>,
-        move factory: send fn() -> Result<WebApplication>) -> Thread<Result<bool>> {
-    return thread.spawn(fn() move(factory) -> Result<bool> {
-        match factory() {
-            ok(app) => {
-                match WebServer.bind(
-                        app, limits.to_options("127.0.0.1", 0)) {
-                    ok(server) => {
-                        server.set_intake(intake)
-                        controls.send(server.control())
-                        server.run()?
-                        return ok(true)
-                    }
-                    err(problem) => {
-                        controls.send(failed_control())
-                        return err(problem.msg, problem.kind)
+        move listener: net.TcpListener,
+        controls: Channel<Result<ServerControl>>,
+        move factory: send fn() -> Result<WebApplication>) ->
+        Thread<Result<bool>> {
+    return thread.spawn_async(
+        send async fn() move(factory, listener) -> Result<bool> {
+            match factory() {
+                err(problem) => {
+                    await controls.send_async(err(
+                        problem.msg, problem.kind))
+                    return err(problem.msg, problem.kind)
+                }
+                ok(app) => {
+                    match WebServer.adopt(
+                            app, limits.to_options(host, port),
+                            move listener) {
+                        err(problem) => {
+                            await controls.send_async(err(
+                                problem.msg, problem.kind))
+                            return err(problem.msg, problem.kind)
+                        }
+                        ok(server) => {
+                            await controls.send_async(ok(server.control()))
+                            await server.run()?
+                            return ok(true)
+                        }
                     }
                 }
             }
-            err(problem) => {
-                controls.send(failed_control())
-                return err(problem.msg, problem.kind)
-            }
-        }
-    })
+        })
 }
 
-/// The worker count `serve` should be given when the caller has no stronger
-/// opinion. One: measured on macOS (arm64, 8-core), a single loop matches a
-/// four-process Bun lane's throughput at lower CPU per request, while extra
-/// workers mostly buy kernel-side contention — the platform serializes accepts
-/// through one listener regardless. Give more workers only to CPU-heavy
-/// handlers that saturate the one loop, and route blocking work through
-/// `WorkerPool` either way. Linux gets its own measured default once the
-/// Linux lane lands.
-pub fn recommended_workers() -> int {
-    return 1
+async fn join_worker(move worker: Thread<Result<bool>>) -> Result<bool> {
+    match await worker.join_async() {
+        ok(run) => { return run }
+        err(problem) => { return err(problem.msg, problem.kind) }
+    }
 }
 
-/// Runs one acceptor plus one serving event loop per factory, all answering
-/// on a single port. The calling thread owns the listening socket and deals
-/// each connection to the workers round-robin; every worker owns an
-/// independent application, service graph, and poller, so requests never
-/// contend on shared state. One factory serves from the calling thread
-/// alone. Blocks until the workers return.
-pub fn serve(
+/// The default remains one worker. Add workers only after measuring a
+/// CPU-bound application on its target platform.
+pub fn recommended_workers() -> int { return 1 }
+
+/// Runs one async server per factory. With several factories, workers bind
+/// the same port through SO_REUSEPORT and keep independent app/service graphs.
+pub async fn serve(
         options: ServerOptions,
         move factories: List<send fn() -> Result<WebApplication>>) -> Result<bool> {
     options.validate()?
@@ -141,105 +127,85 @@ pub fn serve(
             factories.pop().expect("worker factory")
         let app: WebApplication = only()?
         let server: WebServer = WebServer.bind(app, options)?
-        server.run()?
+        await server.run()?
         return ok(true)
     }
 
-    let worker_count: int = factories.len()
+    let count: int = factories.len()
     let limits: WorkerLimits = worker_limits(options)
-    let handshake: Channel<ServerControl> = new Channel(worker_count)
+    let first: net.TcpListener = net.TcpListener.bind_reuse_port_with_backlog(
+        options.host, options.port, options.backlog)?
+    let port: int = first.port()?
+    var listeners: List<net.TcpListener> = []
+    listeners.push(move first)
+    for index: int in 1..count {
+        listeners.push(net.TcpListener.bind_reuse_port_with_backlog(
+            options.host, port, options.backlog)?)
+    }
 
-    var intakes: List<IntakeQueue> = []
+    let controls: Channel<Result<ServerControl>> = new Channel(count)
     var workers: List<Thread<Result<bool>>> = []
-    for index: int in 0..worker_count {
-        let intake: IntakeQueue = IntakeQueue {
-            streams: new Mutex([]),
-            flagged: new Atomic<bool>(false),
-        }
-        intakes.push(intake)
+    for index: int in 0..count {
         let factory: send fn() -> Result<WebApplication> =
             factories.pop().expect("worker factory")
+        let listener: net.TcpListener = listeners.pop().expect("worker listener")
         workers.push(spawn_worker(
-            limits, intakes[index], handshake, move factory))
+            options.host, port, limits, move listener,
+            controls, move factory))
     }
 
-    var controls: List<ServerControl> = []
-    var startup_broken: bool = false
-    for index: int in 0..worker_count {
-        match handshake.receive() {
-            some(control) => {
-                if control.signal < 0 { startup_broken = true }
-                controls.push(control)
-            }
-            none => { startup_broken = true }
-        }
-    }
-
-    var failed: Option<Error> = none
-    if !startup_broken {
-        // The acceptor. Ownership of every connection passes through this
-        // loop exactly once: accept, push under the worker's lock, wake it.
-        match net.TcpListener.bind_with_backlog(
-                options.host, options.port, options.backlog) {
-            ok(listener) => {
-                var carrier: List<net.TcpStream> = []
-                var turn: int = 0
-                for {
-                    let accepted: Result<net.TcpStream> = listener.accept()
-                    var accept_broke: bool = false
-                    match accepted {
-                        ok(_) => {}
-                        err(problem) => {
-                            failed = some(problem)
-                            accept_broke = true
+    var live_controls: List<ServerControl> = []
+    var failed_message: string = ""
+    var failed_kind: string = ""
+    for index: int in 0..count {
+        match await controls.receive_async() {
+            some(started) => {
+                match started {
+                    ok(control) => { live_controls.push(control) }
+                    err(problem) => {
+                        if failed_message == "" {
+                            failed_message = problem.msg
+                            failed_kind = problem.kind
                         }
                     }
-                    if accept_broke { break }
-                    carrier.push((move accepted).expect("accepted stream"))
-                    intakes[turn].streams.with_lock(
-                        fn(waiting: List<net.TcpStream>) {
-                            let next: Option<net.TcpStream> = carrier.pop()
-                            if !next.is_none() {
-                                waiting.push((move next).expect(
-                                    "handoff stream"))
-                            }
-                        })
-                    // Flag after the push, wake after the flag: the drain the
-                    // wake triggers must see both.
-                    intakes[turn].flagged.store(true, MemoryOrder.release)
-                    let woken: Result<bool> =
-                        poll.wake(controls[turn].signal)
-                    turn += 1
-                    if turn >= worker_count { turn = 0 }
                 }
             }
-            err(problem) => { failed = some(problem) }
-        }
-    }
-
-    // Stop every worker before judging the run: a dead acceptor with live
-    // workers would strand the port half-served.
-    for index: int in 0..controls.len() {
-        if controls[index].signal >= 0 {
-            let ignored: Result<bool> = controls[index].stop()
-        }
-    }
-    for index: int in 0..workers.len() {
-        let worker: Thread<Result<bool>> =
-            workers.pop().expect("worker handle")
-        match worker.join() {
-            ok(_) => {}
-            err(problem) => {
-                if failed.is_none() { failed = some(problem) }
+            none => {
+                if failed_message == "" {
+                    failed_message = "a worker failed before serving"
+                    failed_kind = "worker"
+                }
             }
         }
     }
-    match failed {
-        some(problem) => { return err(problem.msg, problem.kind) }
-        none => {}
+    if failed_message != "" {
+        for control: ServerControl in live_controls {
+            control.stop()?
+        }
     }
-    if startup_broken {
-        return err("a worker failed before serving", "worker")
+    let joins: aio.TaskGroup<Result<bool>> =
+        new aio.TaskGroup<Result<bool>>()
+    for workers.len() > 0 {
+        let worker: Thread<Result<bool>> =
+            workers.pop().expect("worker handle")
+        joins.start(join_worker(move worker))
+    }
+    for index: int in 0..count {
+        match (await joins.next()).expect("worker join") {
+            ok(_) => {}
+            err(problem) => {
+                if failed_message == "" {
+                    failed_message = problem.msg
+                    failed_kind = problem.kind
+                    for control: ServerControl in live_controls {
+                        control.stop()?
+                    }
+                }
+            }
+        }
+    }
+    if failed_message != "" {
+        return err(failed_message, failed_kind)
     }
     return ok(true)
 }

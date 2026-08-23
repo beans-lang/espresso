@@ -114,12 +114,16 @@ pub class ProblemResult implements ActionResult {
     }
 }
 
-/// A response the handler finished by hand, or handed to a Responder via
-/// respond_later — executing it changes nothing.
+/// A response the handler already finished by writing `context.response`.
 pub class DetachedResult implements ActionResult {
     pub fn init() {}
 
     pub fn execute(context: HttpContext) -> Result<bool> {
+        if !context.response.completed {
+            return err(
+                "DetachedResult needs an already-filled response",
+                "response")
+        }
         return ok(true)
     }
 }
@@ -241,7 +245,7 @@ pub fn html(body: string) -> Result<ActionResult> {
     return ok(new HtmlResult(200, body))
 }
 
-/// The handler answered by hand, or armed a Responder.
+/// The handler already filled `context.response` by hand.
 pub fn detached() -> Result<ActionResult> {
     return ok(new DetachedResult())
 }

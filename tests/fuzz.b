@@ -16,11 +16,11 @@ fn request(target: string) -> http.ServedRequest {
     return served
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
-    app.get("/\{*path\}", endpoint).expect("catch all")
+    app.get_sync("/\{*path\}", endpoint).expect("catch all")
 
     let invalid: List<string> = [
         "", "relative", "/bad%", "/bad%2", "/bad%GG",
@@ -28,7 +28,7 @@ fn main() {
     ]
     var refused: int = 0
     for target: string in invalid {
-        match app.handle(
+        match await app.handle(
                 request(target), new net.Address("127.0.0.1", 1)) {
             ok(context) => {
                 if context.response.status != 200 { refused += 1 }
@@ -43,7 +43,7 @@ fn main() {
     ]
     var accepted: int = 0
     for target: string in valid {
-        match app.handle(
+        match await app.handle(
                 request(target), new net.Address("127.0.0.1", 1)) {
             ok(context) => {
                 if context.response.status == 200 { accepted += 1 }
@@ -53,7 +53,7 @@ fn main() {
         }
     }
     io.println("targets refused {refused} accepted {accepted}")
-    match app.get("/\{*other\}", endpoint) {
+    match app.get_sync("/\{*other\}", endpoint) {
         ok(_) => io.println("conflict accepted"),
         err(error) => io.println("conflict {error.kind}"),
     }

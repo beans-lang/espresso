@@ -325,10 +325,6 @@ pub class HttpContext {
     scope_active: bool = false
     trace_seq: int = 0
     trace_text: string = ""
-    mailbox: Option<LoopMailbox> = none
-    mail_token: int = 0
-    mail_generation: int = 0
-    deferred: bool = false
 
     pub fn init(move request: HttpRequest,
                 services: ServiceProvider) {
@@ -350,38 +346,7 @@ pub class HttpContext {
         self.head_only = false
         self.trace_seq = sequence
         self.trace_text = ""
-        self.deferred = false
         return self.request.begin(head)
-    }
-
-    // The server loop stamps each request with its connection's mailbox
-    // coordinates before dispatch; `respond_later` needs them.
-    fn arm(mailbox: LoopMailbox, token: int, generation: int) {
-        self.mailbox = some(mailbox)
-        self.mail_token = token
-        self.mail_generation = generation
-    }
-
-    /// Marks this request deferred and returns the move-only, Send handle
-    /// that finishes it from any thread. The connection stops reading until
-    /// the responder answers or the pending timeout fires, so response order
-    /// stays safe even under pipelining. One responder per request.
-    pub fn respond_later() -> Result<Responder> {
-        if self.deferred {
-            return err("this request already has a responder", "deferred")
-        }
-        match self.mailbox {
-            some(mail) => {
-                self.deferred = true
-                return ok(new Responder(
-                    mail, self.mail_token, self.mail_generation))
-            }
-            none => {
-                return err(
-                    "deferred responses need the espresso server loop",
-                    "deferred")
-            }
-        }
     }
 
     fn open_scope() -> Result<bool> {

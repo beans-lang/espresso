@@ -6,15 +6,16 @@ import std.http
 import std.io
 import std.net
 
-fn middleware(context: espresso.HttpContext,
-              next: fn(espresso.HttpContext) -> Result<bool>) -> Result<bool> {
+async fn middleware(
+        context: espresso.HttpContext,
+        next: async fn(espresso.HttpContext) -> Result<bool>) -> Result<bool> {
     context.response.header("X-Before", "yes")
-    let handled: bool = next(context)?
+    let handled: bool = await next(context)?
     context.response.header("X-After", "yes")
     return ok(handled)
 }
 
-fn hello(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+async fn hello(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     let name: string = context.request.route("name").or("missing")
     let tag_count: int = context.request.query()?.all("tag").len()
     return espresso.text_status(200, "hello {name} tags {tag_count}")
@@ -39,11 +40,11 @@ fn served(method: string, target: string, body: string = "") -> http.ServedReque
     return request
 }
 
-fn show(app: espresso.WebApplication,
-        method: string,
-        target: string,
-        body: string = "") -> Result<bool> {
-    let context: espresso.HttpContext = app.handle(
+async fn show(app: espresso.WebApplication,
+              method: string,
+              target: string,
+              body: string = "") -> Result<bool> {
+    let context: espresso.HttpContext = await app.handle(
         served(method, target, body),
         new net.Address("127.0.0.1", 1234))?
     io.println("{method} {target} -> {context.response.status} [{context.response.body.to_string()}]")
@@ -52,23 +53,23 @@ fn show(app: espresso.WebApplication,
     return ok(true)
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
     app.use(middleware).expect("middleware")
     app.get("/hello/\{name\}", hello).expect("hello")
-    app.post("/json", json_echo).expect("json")
-    app.get("/broken", broken).expect("broken")
+    app.post_sync("/json", json_echo).expect("json")
+    app.get_sync("/broken", broken).expect("broken")
 
-    show(app, "GET", "/hello/Ada?tag=one&tag=two").expect("get")
-    show(app, "HEAD", "/hello/Ada").expect("head")
-    show(app, "OPTIONS", "/hello/Ada").expect("options")
-    show(app, "POST", "/hello/Ada").expect("method")
-    show(app, "GET", "/missing").expect("missing")
-    show(app, "POST", "/json", "\{\"name\":\"Beans\"\}").expect("json")
-    show(app, "GET", "/broken").expect("broken")
-    match app.handle(
+    (await show(app, "GET", "/hello/Ada?tag=one&tag=two")).expect("get")
+    (await show(app, "HEAD", "/hello/Ada")).expect("head")
+    (await show(app, "OPTIONS", "/hello/Ada")).expect("options")
+    (await show(app, "POST", "/hello/Ada")).expect("method")
+    (await show(app, "GET", "/missing")).expect("missing")
+    (await show(app, "POST", "/json", "\{\"name\":\"Beans\"\}")).expect("json")
+    (await show(app, "GET", "/broken")).expect("broken")
+    match await app.handle(
         served("GET", "/bad%2"),
         new net.Address("127.0.0.1", 1234)) {
         ok(context) => io.println("bad target status {context.response.status}"),

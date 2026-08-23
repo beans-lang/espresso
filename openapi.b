@@ -78,7 +78,7 @@ pub fn map_openapi(app: WebApplication,
                    title: string = "Espresso API",
                    version: string = "1.0.0") -> Result<bool> {
     let document: string = openapi_json(app, title, version)?
-    return app.get(path, fn(context: HttpContext) -> Result<ActionResult> {
+    return app.get_sync(path, fn(context: HttpContext) -> Result<ActionResult> {
         return json_text(document)
     })
 }

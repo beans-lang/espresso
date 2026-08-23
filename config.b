@@ -118,6 +118,18 @@ pub fn configure_server(config: Configuration,
         "server:idle-timeout-ms", options.idle_timeout_ms)?
     options.graceful_shutdown_ms = config.integer(
         "server:graceful-shutdown-ms", options.graceful_shutdown_ms)?
+    match config.get("server:request-timeout-ms") {
+        some(_) => {
+            options.request_timeout_ms = config.integer(
+                "server:request-timeout-ms", options.request_timeout_ms)?
+            // A written new key always wins over the compatibility field.
+            options.pending_timeout_ms = 0
+        }
+        none => {
+            options.pending_timeout_ms = config.integer(
+                "server:pending-timeout-ms", options.pending_timeout_ms)?
+        }
+    }
     options.max_body_bytes = config.integer(
         "server:max-body-bytes", options.max_body_bytes)?
     return options.validate()

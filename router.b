@@ -7,7 +7,8 @@ class Route {
     names: List<string>
     kinds: List<int>
     score: int
-    handler: fn(HttpContext) -> Result<ActionResult>
+    handler: Option<async fn(HttpContext) -> Result<ActionResult>> = none
+    sync_handler: Option<fn(HttpContext) -> Result<ActionResult>> = none
 
     fn init(method: string,
             pattern: string,
@@ -15,7 +16,8 @@ class Route {
             move names: List<string>,
             move kinds: List<int>,
             score: int,
-            handler: fn(HttpContext) -> Result<ActionResult>) {
+            handler: Option<async fn(HttpContext) -> Result<ActionResult>>,
+            sync_handler: Option<fn(HttpContext) -> Result<ActionResult>>) {
         self.method = method
         self.pattern = pattern
         self.segments = move segments
@@ -23,6 +25,7 @@ class Route {
         self.kinds = move kinds
         self.score = score
         self.handler = handler
+        self.sync_handler = sync_handler
     }
 
     fn same_shape(other: Route) -> bool {
@@ -78,11 +81,13 @@ class Route {
             request_index += 1
         }
     }
+
 }
 
 fn parsed_route(method: string,
                 pattern: string,
-                handler: fn(HttpContext) -> Result<ActionResult>) -> Result<Route> {
+                handler: Option<async fn(HttpContext) -> Result<ActionResult>>,
+                sync_handler: Option<fn(HttpContext) -> Result<ActionResult>>) -> Result<Route> {
     if method == "" { return err("a route needs an HTTP method", "route") }
     if pattern == "" || !pattern.starts_with("/") {
         return err("a route pattern must start with /", "route")
@@ -136,7 +141,7 @@ fn parsed_route(method: string,
     }
     return ok(new Route(
         method.to_upper(), pattern, move route_segments,
-        move names, move kinds, score, handler))
+        move names, move kinds, score, handler, sync_handler))
 }
 
 /// Method-and-path router with static, parameter, and final catch-all segments.
@@ -183,12 +188,22 @@ pub class Router {
 
     pub fn map(method: string,
                pattern: string,
-               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
-        let route: Route = parsed_route(method, pattern, handler)?
+               handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.add(parsed_route(method, pattern, some(handler), none)?)
+    }
+
+    /// Maps a synchronous handler without a task or wrapper allocation.
+    pub fn map_sync(method: string,
+                    pattern: string,
+                    handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.add(parsed_route(method, pattern, none, some(handler))?)
+    }
+
+    fn add(route: Route) -> Result<bool> {
         for existing: Route in self.routes {
             if existing.same_shape(route) {
                 return err(
-                    "route {route.method} {pattern} conflicts with {existing.pattern}",
+                    "route {route.method} {route.pattern} conflicts with {existing.pattern}",
                     "route_conflict")
             }
         }
@@ -198,28 +213,53 @@ pub class Router {
     }
 
     pub fn get(pattern: string,
-               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+               handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("GET", pattern, handler)
     }
 
     pub fn post(pattern: string,
-                handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+                handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("POST", pattern, handler)
     }
 
     pub fn put(pattern: string,
-               handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+               handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PUT", pattern, handler)
     }
 
     pub fn patch(pattern: string,
-                 handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+                 handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("PATCH", pattern, handler)
     }
 
     pub fn delete(pattern: string,
-                  handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+                  handler: async fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
         return self.map("DELETE", pattern, handler)
+    }
+
+    pub fn get_sync(pattern: string,
+                    handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("GET", pattern, handler)
+    }
+
+    pub fn post_sync(pattern: string,
+                     handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("POST", pattern, handler)
+    }
+
+    pub fn put_sync(pattern: string,
+                    handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("PUT", pattern, handler)
+    }
+
+    pub fn patch_sync(pattern: string,
+                      handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("PATCH", pattern, handler)
+    }
+
+    pub fn delete_sync(pattern: string,
+                       handler: fn(HttpContext) -> Result<ActionResult>) -> Result<bool> {
+        return self.map_sync("DELETE", pattern, handler)
     }
 
     fn add_allowed(allowed: List<string>, method: string) {
@@ -229,7 +269,7 @@ pub class Router {
         }
     }
 
-    fn dispatch(context: HttpContext) -> Result<bool> {
+    async fn dispatch(context: HttpContext) -> Result<bool> {
         let requested: string = context.request.method
 
         // Fast path: a literal request path hitting a fully static route on
@@ -244,8 +284,20 @@ pub class Router {
                 some(index) => {
                     context.head_only = requested == "HEAD"
                     let route: Route = self.routes[index]
-                    let produced: ActionResult = route.handler(context)?
-                    return produced.execute(context)
+                    var produced: Option<ActionResult> = none
+                    match route.sync_handler {
+                        some(handler) => { produced = some(handler(context)?) }
+                        none => {
+                            match route.handler {
+                                some(handler) => {
+                                    produced = some(await handler(context)?)
+                                }
+                                none => {}
+                            }
+                        }
+                    }
+                    let ready: ActionResult = produced.expect("route handler")
+                    return ready.execute(context)
                 }
                 none => {}
             }
@@ -280,8 +332,19 @@ pub class Router {
             some(route) => {
                 route.capture_values(context.request)
                 context.head_only = requested == "HEAD"
-                let produced: ActionResult = route.handler(context)?
-                return produced.execute(context)
+                var produced: Option<ActionResult> = none
+                match route.sync_handler {
+                    some(handler) => { produced = some(handler(context)?) }
+                    none => {
+                        match route.handler {
+                            some(handler) => {
+                                produced = some(await handler(context)?)
+                            }
+                            none => {}
+                        }
+                    }
+                }
+                return produced.expect("route handler").execute(context)
             }
             none => {}
         }

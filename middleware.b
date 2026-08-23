@@ -12,8 +12,8 @@ import std.time
 /// One pipeline layer. handle() calls next(context) to continue, or
 /// answers the response itself and returns without calling it.
 pub interface Middleware {
-    fn handle(context: HttpContext,
-              next: fn(HttpContext) -> Result<bool>) -> Result<bool>
+    async fn handle(context: HttpContext,
+                    next: async fn(HttpContext) -> Result<bool>) -> Result<bool>
 }
 
 /// Logs one line per request on a std.log logger: method, path, status
@@ -23,10 +23,10 @@ pub class RequestLog implements Middleware {
 
     pub fn init(logger: log.Logger) { self.logger = logger }
 
-    pub fn handle(context: HttpContext,
-                  next: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+    pub async fn handle(context: HttpContext,
+                        next: async fn(HttpContext) -> Result<bool>) -> Result<bool> {
         let started: int = time.monotonic_nanos()
-        let result: Result<bool> = next(context)
+        let result: Result<bool> = await next(context)
         let elapsed: int = time.monotonic_nanos() - started
         let level: log.Level = if result.is_ok() {
             log.Level.info

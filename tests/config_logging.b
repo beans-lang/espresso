@@ -8,6 +8,7 @@ fn main() {
     let config: espresso.Configuration = new espresso.Configuration()
     config.set("server:host", "0.0.0.0").expect("host")
     config.set("server:port", "9000").expect("port")
+    config.set("server:pending-timeout-ms", "250").expect("old timeout")
     config.add_arguments([
         "--server:port=0",
         "--feature", "yes",
@@ -16,6 +17,10 @@ fn main() {
     let options: espresso.ServerOptions = new espresso.ServerOptions()
     espresso.configure_server(config, options).expect("server config")
     io.println("server {options.host}:{options.port}")
+    io.println("old timeout {options.pending_timeout_ms}")
+    config.set("server:request-timeout-ms", "400").expect("new timeout")
+    espresso.configure_server(config, options).expect("new server config")
+    io.println("new timeout {options.request_timeout_ms} old {options.pending_timeout_ms}")
     io.println("feature {config.boolean("feature", false).expect("feature")}")
     io.println("missing {config.integer("missing", 42).expect("fallback")}")
     match config.integer("feature", 0) {

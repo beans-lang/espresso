@@ -3,12 +3,12 @@ package main
 import espresso
 import std.io
 
-fn hello(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+async fn hello(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     let name: string = context.request.route("name").or("world")
     return espresso.text("Hello, {name}!")
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("build app")
@@ -21,5 +21,5 @@ fn main() {
         espresso.WebServer.bind(app, options).expect("bind server")
     io.println("Espresso listening on http://127.0.0.1:{server.port().expect("port")}")
     io.println("Try /hello/Beans or /openapi.json")
-    server.run().expect("run server")
+    (await server.run()).expect("run server")
 }

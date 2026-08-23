@@ -22,8 +22,8 @@ pub class UnitPricer implements Pricer {
 
 pub class KeyAuthorizer implements espresso.Authorizer {
     pub fn init() {}
-    pub fn authorize(context: espresso.HttpContext,
-                     policy: string) -> Result<bool> {
+    pub async fn authorize(context: espresso.HttpContext,
+                           policy: string) -> Result<bool> {
         let key: string =
             context.request.headers.get("X-Api-Key").or("")
         if policy == "admin" { return ok(key == "admin-key") }
@@ -155,9 +155,9 @@ struct ReportModel {
     rows: List<ReportRow>
 }
 
-fn show(host: espresso.TestHost, label: string, method: string,
-        target: string, body: string = "",
-        key: string = "") -> Result<bool> {
+async fn show(host: espresso.TestHost, label: string, method: string,
+              target: string, body: string = "",
+              key: string = "") -> Result<bool> {
     let headers: http.Headers = new http.Headers()
     if key != "" { headers.add("X-Api-Key", key) }
     if method != "GET" {
@@ -165,12 +165,12 @@ fn show(host: espresso.TestHost, label: string, method: string,
     }
     headers.add("User-Agent", "beans-test")
     let response: espresso.TestResponse =
-        host.send_with_headers(method, target, headers, body)?
+        await host.send_with_headers(method, target, headers, body)?
     io.println("{label} {response.status} [{response.text()}]")
     return ok(true)
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     builder.services.add_singleton<Pricer, UnitPricer>()
@@ -190,63 +190,58 @@ fn main() {
     let host: espresso.TestHost = new espresso.TestHost(app)
 
     // binding from route, query defaults, headers
-    show(host, "show", "GET", "/orders/7").expect("show")
-    show(host, "styled", "GET", "/orders/7?style=fancy").expect("styled")
-    show(host, "missing", "GET", "/orders/404").expect("missing")
-    show(host, "price", "GET", "/orders/7/price?count=4").expect("price")
+    (await show(host, "show", "GET", "/orders/7")).expect("show")
+    (await show(host, "styled", "GET", "/orders/7?style=fancy")).expect("styled")
+    (await show(host, "missing", "GET", "/orders/404")).expect("missing")
+    (await show(host, "price", "GET", "/orders/7/price?count=4")).expect("price")
     // type errors from the client answer 400, not 500
-    show(host, "bad-route", "GET", "/orders/seven").expect("bad route")
-    show(host, "bad-query", "GET", "/orders/7/price?count=lots")
+    (await show(host, "bad-route", "GET", "/orders/seven")).expect("bad route")
+    (await show(host, "bad-query", "GET", "/orders/7/price?count=lots"))
         .expect("bad query")
-    show(host, "no-query", "GET", "/orders/7/price").expect("no query")
+    (await show(host, "no-query", "GET", "/orders/7/price")).expect("no query")
 
     // body binding: valid, invalid JSON, wrong shape, failed validation
-    show(host, "place", "POST", "/orders",
-         "\{\"sku\":\"beans-1\",\"count\":2,\"express\":true,\"tags\":[\"a\",\"b\"]\}")
-        .expect("place")
-    show(host, "bad-json", "POST", "/orders", "\{not json")
+    (await show(host, "place", "POST", "/orders",
+         "\{\"sku\":\"beans-1\",\"count\":2,\"express\":true,\"tags\":[\"a\",\"b\"]\}")).expect("place")
+    (await show(host, "bad-json", "POST", "/orders", "\{not json"))
         .expect("bad json")
-    show(host, "wrong-shape", "POST", "/orders",
-         "\{\"sku\":\"beans-1\",\"count\":\"two\",\"express\":true,\"tags\":[]\}")
-        .expect("wrong shape")
-    show(host, "missing-field", "POST", "/orders",
-         "\{\"sku\":\"beans-1\",\"count\":2,\"express\":false\}")
-        .expect("missing field")
-    show(host, "invalid", "POST", "/orders",
-         "\{\"sku\":\"\",\"count\":500,\"express\":false,\"tags\":[]\}")
-        .expect("invalid")
+    (await show(host, "wrong-shape", "POST", "/orders",
+         "\{\"sku\":\"beans-1\",\"count\":\"two\",\"express\":true,\"tags\":[]\}")).expect("wrong shape")
+    (await show(host, "missing-field", "POST", "/orders",
+         "\{\"sku\":\"beans-1\",\"count\":2,\"express\":false\}")).expect("missing field")
+    (await show(host, "invalid", "POST", "/orders",
+         "\{\"sku\":\"\",\"count\":500,\"express\":false,\"tags\":[]\}")).expect("invalid")
     // nested object binding
-    show(host, "note", "POST", "/orders/9/notes",
-         "\{\"text\":\"rush it\",\"order\":\{\"sku\":\"beans-2\",\"count\":1,\"express\":false,\"tags\":[]\}\}")
-        .expect("note")
+    (await show(host, "note", "POST", "/orders/9/notes",
+         "\{\"text\":\"rush it\",\"order\":\{\"sku\":\"beans-2\",\"count\":1,\"express\":false,\"tags\":[]\}\}")).expect("note")
 
     // context + injected service parameters
-    show(host, "context", "GET", "/orders/3/context").expect("context")
+    (await show(host, "context", "GET", "/orders/3/context")).expect("context")
 
     // auth filter: missing key, wrong key, right key
-    show(host, "auth-none", "GET", "/admin/panel").expect("auth none")
-    show(host, "auth-wrong", "GET", "/admin/panel", "", "user-key")
+    (await show(host, "auth-none", "GET", "/admin/panel")).expect("auth none")
+    (await show(host, "auth-wrong", "GET", "/admin/panel", "", "user-key"))
         .expect("auth wrong")
-    show(host, "auth-ok", "GET", "/admin/panel", "", "admin-key")
+    (await show(host, "auth-ok", "GET", "/admin/panel", "", "admin-key"))
         .expect("auth ok")
 
     // rate limit: two pass, the third answers 429 with Retry-After
-    show(host, "limit-1", "GET", "/admin/expensive", "", "admin-key")
+    (await show(host, "limit-1", "GET", "/admin/expensive", "", "admin-key"))
         .expect("limit one")
-    show(host, "limit-2", "GET", "/admin/expensive", "", "admin-key")
+    (await show(host, "limit-2", "GET", "/admin/expensive", "", "admin-key"))
         .expect("limit two")
     let limited_headers: http.Headers = new http.Headers()
     limited_headers.add("X-Api-Key", "admin-key")
-    let limited: espresso.TestResponse = host.send_with_headers(
-        "GET", "/admin/expensive", limited_headers).expect("limited")
+    let limited: espresso.TestResponse = (await host.send_with_headers(
+        "GET", "/admin/expensive", limited_headers)).expect("limited")
     io.println(
         "limit-3 {limited.status} retry {limited.headers.get("Retry-After").or("none")}")
 
     // the view result renders escaped HTML with sections
     let report_headers: http.Headers = new http.Headers()
     report_headers.add("X-Api-Key", "admin-key")
-    let report: espresso.TestResponse = host.send_with_headers(
-        "GET", "/admin/report", report_headers).expect("report")
+    let report: espresso.TestResponse = (await host.send_with_headers(
+        "GET", "/admin/report", report_headers)).expect("report")
     io.println("report {report.status} [{report.text()}]")
     io.println(
         "report-type {report.headers.get("Content-Type").or("none")}")

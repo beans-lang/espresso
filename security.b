@@ -19,17 +19,18 @@ pub class CorsOptions {
 
 /// Strict CORS middleware. Wildcard origins cannot be combined with cookies.
 pub fn cors(options: CorsOptions) -> Result<
-    fn(HttpContext, fn(HttpContext) -> Result<bool>) -> Result<bool>> {
+    async fn(HttpContext,
+             async fn(HttpContext) -> Result<bool>) -> Result<bool>> {
     if options.allow_credentials && options.allowed_origins.contains("*") {
         return err("CORS credentials cannot use a wildcard origin", "config")
     }
     if options.max_age_seconds < 0 {
         return err("CORS max age cannot be negative", "config")
     }
-    return ok(fn(context: HttpContext,
-                 next: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+    return ok(async fn(context: HttpContext,
+                 next: async fn(HttpContext) -> Result<bool>) -> Result<bool> {
         match context.request.headers.get("Origin") {
-            none => { return next(context) }
+            none => { return await next(context) }
             some(origin) => {
                 if !options.allows(origin) {
                     return write_problem(
@@ -57,16 +58,17 @@ pub fn cors(options: CorsOptions) -> Result<
                     context.response.no_content()
                     return ok(true)
                 }
-                return next(context)
+                return await next(context)
             }
         }
     })
 }
 
 /// Common browser hardening headers for API responses.
-pub fn security_headers(context: HttpContext,
-                        next: fn(HttpContext) -> Result<bool>) -> Result<bool> {
-    let result: Result<bool> = next(context)
+pub async fn security_headers(
+        context: HttpContext,
+        next: async fn(HttpContext) -> Result<bool>) -> Result<bool> {
+    let result: Result<bool> = await next(context)
     context.response.header("X-Content-Type-Options", "nosniff")
     context.response.header("X-Frame-Options", "DENY")
     context.response.header("Referrer-Policy", "no-referrer")
@@ -89,16 +91,17 @@ fn constant_time_equal(left: string, right: string) -> bool {
 
 /// Header-based API key authentication with a non-early-exit comparison.
 pub fn api_key(header: string, secret: string) -> Result<
-    fn(HttpContext, fn(HttpContext) -> Result<bool>) -> Result<bool>> {
+    async fn(HttpContext,
+             async fn(HttpContext) -> Result<bool>) -> Result<bool>> {
     if header == "" || secret == "" {
         return err("API key header and secret are required", "config")
     }
-    return ok(fn(context: HttpContext,
-                 next: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+    return ok(async fn(context: HttpContext,
+                 next: async fn(HttpContext) -> Result<bool>) -> Result<bool> {
         match context.request.headers.get(header) {
             some(presented) => {
                 if constant_time_equal(presented, secret) {
-                    return next(context)
+                    return await next(context)
                 }
             }
             none => {}
@@ -171,7 +174,8 @@ class FixedWindowLimiter {
 pub fn fixed_window_rate_limit(limit: int,
                                window_ms: int,
                                max_clients: int = 65536) -> Result<
-    fn(HttpContext, fn(HttpContext) -> Result<bool>) -> Result<bool>> {
+    async fn(HttpContext,
+             async fn(HttpContext) -> Result<bool>) -> Result<bool>> {
     if limit <= 0 || window_ms <= 0 || max_clients <= 0 {
         return err(
             "rate limit, window, and client capacity must be positive",
@@ -179,10 +183,10 @@ pub fn fixed_window_rate_limit(limit: int,
     }
     let limiter: FixedWindowLimiter = new FixedWindowLimiter(
         limit, window_ms, max_clients)
-    return ok(fn(context: HttpContext,
-                 next: fn(HttpContext) -> Result<bool>) -> Result<bool> {
+    return ok(async fn(context: HttpContext,
+                 next: async fn(HttpContext) -> Result<bool>) -> Result<bool> {
         if limiter.allow(context.request.remote.host) {
-            return next(context)
+            return await next(context)
         }
         context.response.header("Retry-After", "{(window_ms + 999) / 1000}")
         return write_problem(

@@ -210,9 +210,9 @@ pub fn map_controllers(app: WebApplication) -> Result<int> {
                             app.map(
                                 endpoint.method,
                                 controller_pattern(prefix, endpoint.route)?,
-                                fn(context: HttpContext) ->
+                                async fn(context: HttpContext) ->
                                     Result<ActionResult> {
-                                    return plan.run(context)
+                                    return await plan.run(context)
                                 })?
                             count += 1
                         }

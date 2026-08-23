@@ -30,36 +30,36 @@ pub class TestHost {
 
     pub fn init(app: WebApplication) { self.app = app }
 
-    pub fn send(method: string,
-                target: string,
-                body: string = "") -> Result<TestResponse> {
-        return self.send_with_headers(
+    pub async fn send(method: string,
+                      target: string,
+                      body: string = "") -> Result<TestResponse> {
+        return await self.send_with_headers(
             method, target, new http.Headers(), body)
     }
 
-    pub fn send_with_headers(method: string,
-                             target: string,
-                             headers: http.Headers,
-                             body: string = "") -> Result<TestResponse> {
+    pub async fn send_with_headers(method: string,
+                                   target: string,
+                                   headers: http.Headers,
+                                   body: string = "") -> Result<TestResponse> {
         if self.closed { return err("the test host is closed", "closed") }
         let served: http.ServedRequest = new http.ServedRequest()
         served.head.method = method
         served.head.target = target
         served.head.headers = headers
         served.body = Bytes.from(body)
-        let context: HttpContext = self.app.handle(
+        let context: HttpContext = await self.app.handle(
             served, new net.Address("127.0.0.1", 1))?
         let response: TestResponse = new TestResponse(context)
         context.close()?
         return ok(response)
     }
 
-    pub fn get(target: string) -> Result<TestResponse> {
-        return self.send("GET", target)
+    pub async fn get(target: string) -> Result<TestResponse> {
+        return await self.send("GET", target)
     }
 
-    pub fn post(target: string, body: string = "") -> Result<TestResponse> {
-        return self.send("POST", target, body)
+    pub async fn post(target: string, body: string = "") -> Result<TestResponse> {
+        return await self.send("POST", target, body)
     }
 
     pub fn close() -> Result<bool> {

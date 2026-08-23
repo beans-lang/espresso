@@ -31,15 +31,14 @@ fn client(port: int, control: espresso.ServerControl) -> string {
     }
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
-    app.get("/hello", hello).expect("route")
+    app.get_sync("/hello", hello).expect("route")
 
     let options: espresso.ServerOptions = new espresso.ServerOptions()
     options.port = 0
-    options.poll_timeout_ms = 100
     let server: espresso.WebServer =
         espresso.WebServer.bind(app, options).expect("server")
     let port: int = server.port().expect("port")
@@ -47,7 +46,7 @@ fn main() {
     let visitor: Thread<string> = thread.spawn(fn() -> string {
         return client(port, control)
     })
-    let stats: espresso.ServerStats = server.run().expect("run")
-    io.println(visitor.join())
+    let stats: espresso.ServerStats = (await server.run()).expect("run")
+    io.println((await visitor.join_async()).expect("visitor"))
     io.println("accepted {stats.accepted} requests {stats.requests} responses {stats.responses} errors {stats.connection_errors}")
 }

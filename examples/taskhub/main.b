@@ -150,8 +150,8 @@ pub class MemoryStore implements ProjectStore {
 pub class KeyRing implements espresso.Authorizer {
     pub fn init() {}
 
-    pub fn authorize(context: espresso.HttpContext,
-                     policy: string) -> Result<bool> {
+    pub async fn authorize(context: espresso.HttpContext,
+                           policy: string) -> Result<bool> {
         let key: string =
             context.request.headers.get("X-Api-Key").or("")
         if policy == "admin" { return ok(key == "admin-key") }
@@ -405,54 +405,61 @@ fn build_app(logger: log.Logger) -> Result<espresso.WebApplication> {
     return ok(app)
 }
 
-fn seed(app: espresso.WebApplication) -> Result<bool> {
+async fn seed(app: espresso.WebApplication) -> Result<bool> {
     let host: espresso.TestHost = new espresso.TestHost(app)
-    let headers_json: Result<espresso.TestResponse> = seed_request(
+    let headers_json: Result<espresso.TestResponse> = await seed_request(
         host, "POST", "/projects",
-        "\{\"name\":\"Espresso 0.2\",\"owner\":\"ada\"\}")
+        "\{\"name\":\"Espresso 0.3\",\"owner\":\"ada\"\}")
     headers_json?
-    seed_request(host, "POST", "/projects",
+    await seed_request(host, "POST", "/projects",
         "\{\"name\":\"Beans 1.0 bake\",\"owner\":\"lin\"\}")?
-    seed_request(host, "POST", "/projects/1/tasks",
+    await seed_request(host, "POST", "/projects/1/tasks",
         "\{\"title\":\"ship ActionResult\",\"effort\":5\}")?
-    seed_request(host, "POST", "/projects/1/tasks",
+    await seed_request(host, "POST", "/projects/1/tasks",
         "\{\"title\":\"write the docs\",\"effort\":3\}")?
-    seed_request(host, "PATCH", "/tasks/1",
+    await seed_request(host, "PATCH", "/tasks/1",
         "\{\"status\":\"done\"\}")?
     return ok(true)
 }
 
-fn seed_request(host: espresso.TestHost, method: string,
-                target: string,
-                body: string) -> Result<espresso.TestResponse> {
+async fn seed_request(host: espresso.TestHost, method: string,
+                      target: string,
+                      body: string) -> Result<espresso.TestResponse> {
     let headers: http.Headers = new http.Headers()
     headers.add("X-Api-Key", "admin-key")
     headers.add("Content-Type", "application/json")
-    return host.send_with_headers(method, target, headers, body)
+    return await host.send_with_headers(method, target, headers, body)
 }
 
-fn demo(app: espresso.WebApplication) -> Result<bool> {
+async fn demo(app: espresso.WebApplication) -> Result<bool> {
     let host: espresso.TestHost = new espresso.TestHost(app)
-    io.println("projects {host.get("/projects")?.text()}")
-    io.println("one {host.get("/projects/1")?.text()}")
-    io.println("tasks {host.get("/projects/1/tasks?status=todo")?.text()}")
-    io.println("missing {host.get("/projects/99")?.status}")
-    io.println("unauthorized {host.post("/projects", "\{\}")?.status}")
-    let dashboard: espresso.TestResponse = host.get("/dashboard")?
+    let projects: espresso.TestResponse = await host.get("/projects")?
+    let project: espresso.TestResponse = await host.get("/projects/1")?
+    let tasks: espresso.TestResponse =
+        await host.get("/projects/1/tasks?status=todo")?
+    let missing: espresso.TestResponse = await host.get("/projects/99")?
+    let unauthorized: espresso.TestResponse =
+        await host.post("/projects", "\{\}")?
+    io.println("projects {projects.text()}")
+    io.println("one {project.text()}")
+    io.println("tasks {tasks.text()}")
+    io.println("missing {missing.status}")
+    io.println("unauthorized {unauthorized.status}")
+    let dashboard: espresso.TestResponse = await host.get("/dashboard")?
     io.println("dashboard {dashboard.status} {dashboard.text().len()} bytes")
     return ok(true)
 }
 
-fn main() {
+async fn main() {
     let logger: log.Logger =
         espresso.console_logger("taskhub").expect("logger")
     let app: espresso.WebApplication =
         build_app(logger).expect("app")
-    seed(app).expect("seed")
+    (await seed(app)).expect("seed")
 
     let arguments: List<string> = os.args()
     if arguments.contains("--demo") {
-        demo(app).expect("demo")
+        (await demo(app)).expect("demo")
         app.close().expect("close")
         return
     }
@@ -463,5 +470,5 @@ fn main() {
         espresso.WebServer.bind(app, options).expect("bind")
     io.println("TaskHub on http://127.0.0.1:{server.port().expect("port")}")
     io.println("dashboard at /dashboard, spec at /openapi.json")
-    server.run().expect("run")
+    (await server.run()).expect("run")
 }

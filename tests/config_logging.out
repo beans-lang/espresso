@@ -1,4 +1,6 @@
 server 0.0.0.0:0
+old timeout 250
+new timeout 400 old 0
 feature true
 missing 42
 bad integer config

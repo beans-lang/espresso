@@ -2,6 +2,39 @@
 
 This file records user-facing changes in each Espresso release.
 
+## Unreleased
+
+## [0.3.0] - 2026-08-23
+
+Breaking async-v2 migration.
+
+### Added
+
+- Async route handlers are the default for `map`, `get`, `post`, `put`,
+  `patch`, and `delete`. The matching `_sync` forms dispatch synchronous
+  handlers inline.
+- Controllers may use sync or async actions. Mapping records the reflection
+  effect once and dispatches async actions with `Method.call_async`.
+- `WorkerPool.execute<T>` runs a blocking Send job on the fixed crew and
+  asynchronously returns its value.
+- Async `WebServer.run`, `serve`, and TestHost request methods.
+- Structured TaskGroup ownership for accepted connections, async socket
+  readiness, timers, shutdown Event, and request deadlines.
+
+### Changed
+
+- Middleware, `Authorizer`, and the full request pipeline are async.
+- `request_timeout_ms` replaces `pending_timeout_ms`. The old field and
+  `server:pending-timeout-ms` config key remain as deprecated aliases for
+  this release. `poll_timeout_ms` and `max_events` are removed.
+- `DetachedResult` now accepts only a response already filled on the current
+  context.
+
+### Removed
+
+- `Responder`, `respond_later`, completion mailboxes, deferred response state,
+  and `WorkerPool.submit`.
+
 ## [0.2.0] - 2026-08-22
 
 ### Added (post-tag)
@@ -93,8 +126,6 @@ measured 95x slower.
   levels, structured fields and an exportable reader. One deliberate
   loss: there is no callback sink — user code never runs inside the
   logger, by `std.log` design.
-
-## Unreleased
 
 ## [0.1.0] - 2026-08-22
 

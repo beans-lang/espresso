@@ -33,16 +33,16 @@ fn free_hello(context: espresso.HttpContext) ->
     return espresso.text("hello {name}")
 }
 
-fn lane(host: espresso.TestHost, label: string,
-        target: string, count: int) -> Result<int> {
+async fn lane(host: espresso.TestHost, label: string,
+              target: string, count: int) -> Result<int> {
     var checksum: int = 0
     for _: int in 0..1000 {
-        let response: espresso.TestResponse = host.get(target)?
+        let response: espresso.TestResponse = await host.get(target)?
         checksum += response.status
     }
     let started: int = time.monotonic_nanos()
     for _: int in 0..count {
-        let response: espresso.TestResponse = host.get(target)?
+        let response: espresso.TestResponse = await host.get(target)?
         checksum += response.status + response.body.len()
     }
     let elapsed: int = time.monotonic_nanos() - started
@@ -55,21 +55,21 @@ fn lane(host: espresso.TestHost, label: string,
     return ok(per_request)
 }
 
-fn main() {
+async fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     builder.services.singleton<Greeting>().expect("greeting")
     espresso.add_controllers(builder).expect("add")
     let app: espresso.WebApplication = builder.build().expect("app")
     espresso.map_controllers(app).expect("map")
-    app.get("/f/hello/\{name\}", free_hello).expect("free")
+    app.get_sync("/f/hello/\{name\}", free_hello).expect("free")
 
     let host: espresso.TestHost = new espresso.TestHost(app)
     let count: int = 50000
     let function_lane: int =
-        lane(host, "free-fn   ", "/f/hello/Ada", count).expect("free lane")
+        (await lane(host, "free-fn   ", "/f/hello/Ada", count)).expect("free lane")
     let controller_lane: int =
-        lane(host, "controller", "/c/hello/Ada", count).expect("controller lane")
+        (await lane(host, "controller", "/c/hello/Ada", count)).expect("controller lane")
     let ratio_hundredths: int =
         if function_lane == 0 { 0 }
         else { controller_lane * 100 / function_lane }
