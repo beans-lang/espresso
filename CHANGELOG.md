@@ -22,6 +22,15 @@ Breaking async-v2 migration.
   readiness, timers, shutdown Event, and request deadlines.
 - A repeatable release benchmark records five-sample JSON/TSV and enforces
   same-machine throughput, p99, CPU/request, and variance gates.
+- `ServerOptions.flush_watermark_bytes` (default 64KB) flushes an outgrown
+  response batch at the next request boundary, and
+  `ServerOptions.wake_guard_ms` (default 25) bounds every driver wait with a
+  pulse task — the macOS long-kevent-wait guard the 0.2 poll loop carried.
+- `WebServer.adopt_intake` runs a worker fed by an acceptor thread over a
+  stream channel and a nudge channel; multi-worker `serve` uses it with one
+  acceptor dealing round-robin, because SO_REUSEPORT does not balance
+  connections on macOS. A synchronous pipeline completes on the request
+  group's first poll and never registers its deadline timer.
 
 ### Changed
 

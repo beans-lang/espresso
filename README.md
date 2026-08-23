@@ -197,8 +197,12 @@ espresso.add_views(builder, views)?
 ## The server
 
 `espresso.WebServer.bind(app, options)` serves plain HTTP/1.1 with
-keep-alive and pipelining; `serve` scales over cores with
-SO_REUSEPORT. `run`, `serve`, and `TestHost` request methods are async.
+keep-alive and pipelining; responses queue per parsed read batch and
+flush once, so a pipelined burst costs one write. `serve` scales over
+cores with one acceptor thread dealing connections round-robin into
+bounded per-worker intake channels — SO_REUSEPORT does not balance on
+macOS — and a full worker back-pressures the acceptor instead of
+dropping. `run`, `serve`, and `TestHost` request methods are async.
 Each connection is a structured child of the server run. Async route
 handlers are the default; `get_sync`, `post_sync`, `map_sync`, and the
 other verb `_sync` forms keep small synchronous handlers on the direct
