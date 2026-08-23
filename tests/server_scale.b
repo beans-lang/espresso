@@ -9,10 +9,10 @@ import std.time
 fn park_clients(port: int, control: espresso.ServerControl) -> int {
     var streams: List<net.TcpStream> = []
     for index: int in 0..1100 {
-        match net.TcpStream.connect_timeout("127.0.0.1", port, 3000) {
-            ok(stream) => { streams.push(move stream) }
-            err(_) => { break }
-        }
+        var dialed: Result<net.TcpStream> =
+            net.TcpStream.connect_timeout("127.0.0.1", port, 3000)
+        if !dialed.is_ok() { break }
+        streams.push((move dialed).expect("client stream"))
     }
     let connected: int = streams.len()
     time.sleep_millis(750)
