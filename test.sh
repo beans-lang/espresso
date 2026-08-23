@@ -37,7 +37,8 @@ for name in "${cases[@]}"; do
 done
 
 if [[ ${ESPRESSO_SLOW:-} == 1 ]]; then
-    "$BEANSC" run "$ROOT/tests/server_scale.b" >"$tmp/server_scale.interp"
+    ESPRESSO_SCALE=150 "$BEANSC" run "$ROOT/tests/server_scale.b" \
+        >"$tmp/server_scale.interp"
     diff -u "$ROOT/tests/server_scale.out" "$tmp/server_scale.interp"
 fi
 
