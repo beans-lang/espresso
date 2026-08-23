@@ -3,6 +3,7 @@
 package main
 
 import espresso
+import std.async as aio
 import std.encoding.json
 import std.http
 import std.io
@@ -59,8 +60,9 @@ pub class HelloController extends espresso.Controller {
     pub fn init() {}
 
     @espresso.get(route: "/\{name\}")
-    pub fn hello(@espresso.route name: string) ->
+    pub async fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
+        await aio.yield_now()
         return self.ok_text("Hello, {name}!")
     }
 }
@@ -169,4 +171,21 @@ async fn main() {
     io.println("validation {errors.count()} {errors.is_valid()} {errors.at(0).code}")
 
     host.close().expect("close")
+
+    // The README's owned-server await is also compiled and run in a bounded
+    // form. Pre-stopping avoids opening a permanent documentation server.
+    let server_builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    espresso.add_controllers(server_builder).expect("server controllers")
+    let server_app: espresso.WebApplication =
+        server_builder.build().expect("server app")
+    espresso.map_controllers(server_app).expect("server map")
+    let server_options: espresso.ServerOptions =
+        new espresso.ServerOptions()
+    server_options.port = 0
+    let server: espresso.WebServer = espresso.WebServer.bind(
+        server_app, server_options).expect("server bind")
+    server.control().stop().expect("server stop")
+    let ignored_stats: espresso.ServerStats =
+        (await server.run()).expect("server run")
 }

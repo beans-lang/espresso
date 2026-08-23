@@ -4,18 +4,6 @@ import std.net
 import std.thread
 import std.time
 
-class ServeShutdown {
-    stopping: Atomic<bool> = new Atomic<bool>(false)
-
-    fn init() {}
-
-    fn stop() { self.stopping.store(true, MemoryOrder.release) }
-
-    fn is_stopping() -> bool {
-        return self.stopping.load(MemoryOrder.acquire)
-    }
-}
-
 // Every option a worker needs after binding, flattened into Send scalars.
 struct WorkerLimits {
     backlog: int
@@ -84,7 +72,7 @@ fn spawn_worker(
         move listener: net.TcpListener,
         controls: Channel<Result<ServerControl>>,
         finished: Channel<Result<bool>>,
-        shutdown: ServeShutdown,
+        shutdown: Atomic<bool>,
         move factory: send fn() -> Result<WebApplication>) ->
         Thread<Result<bool>> {
     return thread.spawn_async(
@@ -107,7 +95,7 @@ fn spawn_worker(
                         ok(server) => {
                             let control: ServerControl = server.control()
                             await controls.send_async(ok(control))
-                            if shutdown.is_stopping() {
+                            if shutdown.load(MemoryOrder.acquire) {
                                 let ignored_stop: Result<bool> = control.stop()
                             }
                             match await server.run() {
@@ -132,7 +120,7 @@ fn spawn_serve_cleanup(
         move workers: List<Thread<Result<bool>>>,
         controls: Channel<Result<ServerControl>>,
         finished: Channel<Result<bool>>,
-        shutdown: ServeShutdown,
+        shutdown: Atomic<bool>,
         ready: Channel<Result<bool>>,
         done: Channel<Result<bool>>,
         count: int) -> Thread<bool> {
@@ -165,7 +153,7 @@ fn spawn_serve_cleanup(
         if failed_message == "" {
             ready.send(ok(true))
             var worker_finished: bool = false
-            for !shutdown.is_stopping() && !worker_finished {
+            for !shutdown.load(MemoryOrder.acquire) && !worker_finished {
                 match finished.try_receive() {
                     some(result) => {
                         worker_finished = true
@@ -184,7 +172,7 @@ fn spawn_serve_cleanup(
             ready.send(err(failed_message, failed_kind))
         }
 
-        shutdown.stop()
+        shutdown.store(true, MemoryOrder.release)
         for control: ServerControl in live_controls {
             let ignored_stop: Result<bool> = control.stop()
         }
@@ -245,7 +233,7 @@ pub async fn serve(
             options.host, port, options.backlog)?)
     }
 
-    let shutdown: ServeShutdown = new ServeShutdown()
+    let shutdown: Atomic<bool> = new Atomic<bool>(false)
     let controls: Channel<Result<ServerControl>> = new Channel(count)
     let finished: Channel<Result<bool>> = new Channel(count)
     let ready: Channel<Result<bool>> = new Channel(1)
@@ -262,7 +250,7 @@ pub async fn serve(
 
     let cleanup: Thread<bool> = spawn_serve_cleanup(
         move workers, controls, finished, shutdown, ready, done, count)
-    defer shutdown.stop()
+    defer shutdown.store(true, MemoryOrder.release)
 
     match await ready.receive_async() {
         some(_) => {}

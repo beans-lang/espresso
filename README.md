@@ -3,8 +3,8 @@
 A web framework for [Beans](https://github.com/beans-lang/beans) in the
 shape of ASP.NET Core: annotated controllers with constructor injection,
 model binding, action results, filters, middleware, server-side views,
-and a fast server underneath. Everything below compiles and runs from
-`tests/docs.b` — a README line that does not compile fails the build.
+and a fast server underneath. The public API shapes below are mirrored by
+`tests/docs.b`, including an async controller and a bounded server run.
 
 ```beans
 import espresso
@@ -218,6 +218,10 @@ effective default remains 30 seconds, and any positive new value wins over
 the deprecated field.
 
 ## Release gates
+
+Run `./test.sh --native` for the required native async smoke suite. Before a
+release, `./test.sh --release` builds the same cases with `--release --lto` and
+also runs the slower 1,100-connection parking gate.
 
 The release benchmark builds with `--release --lto`, warms each lane, and
 records exactly five samples. Point it at the Beans checkout and compiler used

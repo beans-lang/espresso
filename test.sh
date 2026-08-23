@@ -39,14 +39,32 @@ if [[ ${ESPRESSO_SLOW:-} == 1 ]]; then
     diff -u "$ROOT/tests/server_scale.out" "$tmp/server_scale.interp"
 fi
 
+target_cases=(server async_pipeline pool_async server_async serve_async)
 for target in x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwin; do
-    "$BEANSC" check "$ROOT/tests/server.b" --target "$target" >/dev/null
+    for name in "${target_cases[@]}"; do
+        "$BEANSC" check "$ROOT/tests/$name.b" --target "$target" >/dev/null
+    done
 done
 
-if [[ ${1:-} == "--native" ]]; then
-    "$BEANSC" build "$ROOT/tests/smoke.b" -o "$tmp/smoke" >/dev/null
-    "$tmp/smoke" >"$tmp/smoke.native"
-    diff -u "$ROOT/tests/smoke.out" "$tmp/smoke.native"
+mode=${1:-}
+if [[ -n "$mode" && "$mode" != "--native" && "$mode" != "--release" ]]; then
+    echo "usage: ./test.sh [--native|--release]" >&2
+    exit 1
 fi
 
-echo "ok espresso: interpreter, target checks${1:+, native}${ESPRESSO_SLOW:+, slow}"
+if [[ "$mode" == "--native" || "$mode" == "--release" ]]; then
+    native_cases=(smoke async_pipeline pool_async server_async serve_async)
+    build_flags=()
+    if [[ "$mode" == "--release" ]]; then
+        build_flags=(--release --lto)
+        native_cases+=(server_scale)
+    fi
+    for name in "${native_cases[@]}"; do
+        "$BEANSC" build "${build_flags[@]}" \
+            "$ROOT/tests/$name.b" -o "$tmp/$name" >/dev/null
+        "$tmp/$name" >"$tmp/$name.native"
+        diff -u "$ROOT/tests/$name.out" "$tmp/$name.native"
+    done
+fi
+
+echo "ok espresso: interpreter, async target checks${mode:+, ${mode#--}}${ESPRESSO_SLOW:+, slow}"
