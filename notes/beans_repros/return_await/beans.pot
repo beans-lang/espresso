@@ -1,0 +1,2 @@
+module return_await
+kind application

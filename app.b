@@ -3,6 +3,21 @@ package espresso
 import std.http
 import std.net
 
+class ContextHandoff {
+    context: HttpContext
+    armed: bool = true
+
+    fn init(context: HttpContext) { self.context = context }
+
+    fn close_if_armed() {
+        if self.armed {
+            let ignored: Result<bool> = self.context.close()
+        }
+    }
+
+    fn disarm() { self.armed = false }
+}
+
 /// Safe production defaults. Development may opt into detailed errors.
 pub class AppOptions {
     pub detailed_errors: bool = false
@@ -199,12 +214,8 @@ pub class WebApplication {
                         remote: net.Address) -> Result<HttpContext> {
         if self.closed { return err("the application is closed", "closed") }
         let context: HttpContext = self.new_context(remote)
-        var handed_off: bool = false
-        defer {
-            if !handed_off {
-                let ignored: Result<bool> = context.close()
-            }
-        }
+        let handoff: ContextHandoff = new ContextHandoff(context)
+        defer handoff.close_if_armed()
         self.begin_request(context, served.head)?
         context.request.body.append(served.body)
         context.request.keep_alive = served.keep_alive
@@ -212,7 +223,7 @@ pub class WebApplication {
             context.request.trailer_fields = served.trailer_fields
         }
         await self.handle_context(context)?
-        handed_off = true
+        handoff.disarm()
         return ok(context)
     }
 

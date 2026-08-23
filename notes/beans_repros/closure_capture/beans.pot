@@ -1,0 +1,2 @@
+module closure_capture
+kind application

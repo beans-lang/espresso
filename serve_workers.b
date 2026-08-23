@@ -65,52 +65,86 @@ fn worker_limits(options: ServerOptions) -> WorkerLimits {
     }
 }
 
+fn make_worker_app(
+        factory: send fn() -> Result<WebApplication>,
+        controls: Channel<Result<ServerControl>>) -> Result<WebApplication> {
+    match factory() {
+        err(problem) => {
+            controls.send(err(problem.msg, problem.kind))
+            return err(problem.msg, problem.kind)
+        }
+        ok(app) => { return ok(app) }
+    }
+}
+
+fn bind_worker_listener(
+        host: string,
+        port: int,
+        backlog: int,
+        controls: Channel<Result<ServerControl>>) -> Result<net.TcpListener> {
+    let bound: Result<net.TcpListener> =
+        net.TcpListener.bind_reuse_port_with_backlog(host, port, backlog)
+    match bound {
+        err(problem) => {
+            controls.send(err(problem.msg, problem.kind))
+            return err(problem.msg, problem.kind)
+        }
+        ok(_) => {}
+    }
+    return ok((move bound).expect("worker listener"))
+}
+
+fn build_worker_server(
+        app: WebApplication,
+        host: string,
+        port: int,
+        limits: WorkerLimits,
+        controls: Channel<Result<ServerControl>>) -> Result<WebServer> {
+    let listener: net.TcpListener =
+        bind_worker_listener(host, port, limits.backlog, controls)?
+    let adopted: Result<WebServer> = WebServer.adopt(
+        app, limits.to_options(host, port), move listener)
+    match adopted {
+        err(problem) => {
+            controls.send(err(problem.msg, problem.kind))
+            return err(problem.msg, problem.kind)
+        }
+        ok(_) => {}
+    }
+    return ok((move adopted).expect("worker server"))
+}
+
 fn spawn_worker(
         host: string,
         port: int,
         limits: WorkerLimits,
-        move listener: net.TcpListener,
         controls: Channel<Result<ServerControl>>,
         finished: Channel<Result<bool>>,
+        finished_signal: Atomic<bool>,
         shutdown: Atomic<bool>,
         move factory: send fn() -> Result<WebApplication>) ->
         Thread<Result<bool>> {
     return thread.spawn_async(
-        send async fn() move(factory, listener) -> Result<bool> {
-            match factory() {
-                err(problem) => {
-                    await controls.send_async(err(
-                        problem.msg, problem.kind))
-                    return err(problem.msg, problem.kind)
+        send async fn() move(factory) -> Result<bool> {
+            let app: WebApplication =
+                make_worker_app(factory, controls)?
+            let server: WebServer = build_worker_server(
+                app, host, port, limits, controls)?
+            let control: ServerControl = server.control()
+            controls.send(ok(control))
+            if shutdown.load(MemoryOrder.acquire) {
+                let ignored_stop: Result<bool> = control.stop()
+            }
+            match await server.run() {
+                ok(_) => {
+                    finished.send(ok(true))
+                    finished_signal.store(true, MemoryOrder.release)
+                    return ok(true)
                 }
-                ok(app) => {
-                    match WebServer.adopt(
-                            app, limits.to_options(host, port),
-                            move listener) {
-                        err(problem) => {
-                            await controls.send_async(err(
-                                problem.msg, problem.kind))
-                            return err(problem.msg, problem.kind)
-                        }
-                        ok(server) => {
-                            let control: ServerControl = server.control()
-                            await controls.send_async(ok(control))
-                            if shutdown.load(MemoryOrder.acquire) {
-                                let ignored_stop: Result<bool> = control.stop()
-                            }
-                            match await server.run() {
-                                ok(_) => {
-                                    finished.send(ok(true))
-                                    return ok(true)
-                                }
-                                err(problem) => {
-                                    finished.send(err(
-                                        problem.msg, problem.kind))
-                                    return err(problem.msg, problem.kind)
-                                }
-                            }
-                        }
-                    }
+                err(problem) => {
+                    finished.send(err(problem.msg, problem.kind))
+                    finished_signal.store(true, MemoryOrder.release)
+                    return err(problem.msg, problem.kind)
                 }
             }
         })
@@ -120,6 +154,7 @@ fn spawn_serve_cleanup(
         move workers: List<Thread<Result<bool>>>,
         controls: Channel<Result<ServerControl>>,
         finished: Channel<Result<bool>>,
+        finished_signal: Atomic<bool>,
         shutdown: Atomic<bool>,
         ready: Channel<Result<bool>>,
         done: Channel<Result<bool>>,
@@ -154,18 +189,26 @@ fn spawn_serve_cleanup(
             ready.send(ok(true))
             var worker_finished: bool = false
             for !shutdown.load(MemoryOrder.acquire) && !worker_finished {
-                match finished.try_receive() {
-                    some(result) => {
-                        worker_finished = true
-                        match result {
-                            ok(_) => {}
-                            err(problem) => {
-                                failed_message = problem.msg
-                                failed_kind = problem.kind
+                if finished_signal.load(MemoryOrder.acquire) {
+                    worker_finished = true
+                    match finished.receive() {
+                        some(result) => {
+                            match result {
+                                ok(_) => {}
+                                err(problem) => {
+                                    failed_message = problem.msg
+                                    failed_kind = problem.kind
+                                }
                             }
                         }
+                        none => {
+                            failed_message =
+                                "a worker stopped without a result"
+                            failed_kind = "worker"
+                        }
                     }
-                    none => { time.sleep_millis(1) }
+                } else {
+                    time.sleep_millis(1)
                 }
             }
         } else {
@@ -226,30 +269,26 @@ pub async fn serve(
     let first: net.TcpListener = net.TcpListener.bind_reuse_port_with_backlog(
         options.host, options.port, options.backlog)?
     let port: int = first.port()?
-    var listeners: List<net.TcpListener> = []
-    listeners.push(move first)
-    for index: int in 1..count {
-        listeners.push(net.TcpListener.bind_reuse_port_with_backlog(
-            options.host, port, options.backlog)?)
-    }
+    first.close()?
 
     let shutdown: Atomic<bool> = new Atomic<bool>(false)
     let controls: Channel<Result<ServerControl>> = new Channel(count)
     let finished: Channel<Result<bool>> = new Channel(count)
+    let finished_signal: Atomic<bool> = new Atomic<bool>(false)
     let ready: Channel<Result<bool>> = new Channel(1)
     let done: Channel<Result<bool>> = new Channel(1)
     var workers: List<Thread<Result<bool>>> = []
     for index: int in 0..count {
         let factory: send fn() -> Result<WebApplication> =
             factories.pop().expect("worker factory")
-        let listener: net.TcpListener = listeners.pop().expect("worker listener")
         workers.push(spawn_worker(
-            options.host, port, limits, move listener,
-            controls, finished, shutdown, move factory))
+            options.host, port, limits,
+            controls, finished, finished_signal, shutdown, move factory))
     }
 
     let cleanup: Thread<bool> = spawn_serve_cleanup(
-        move workers, controls, finished, shutdown, ready, done, count)
+        move workers, controls, finished, finished_signal,
+        shutdown, ready, done, count)
     defer shutdown.store(true, MemoryOrder.release)
 
     match await ready.receive_async() {
@@ -259,10 +298,8 @@ pub async fn serve(
         }
     }
     let result: Result<bool> = match await done.receive_async() {
-        some(completed) => { completed }
-        none => {
-            err("the serve cleanup stopped before completion", "worker")
-        }
+        some(completed) => completed,
+        none => err("the serve cleanup stopped before completion", "worker"),
     }
     if !cleanup.join() {
         return err("the serve cleanup returned failure", "worker")

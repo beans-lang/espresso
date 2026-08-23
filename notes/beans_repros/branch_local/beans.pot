@@ -1,0 +1,2 @@
+module branch_local
+kind application

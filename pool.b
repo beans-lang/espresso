@@ -35,6 +35,34 @@ fn spawn_pool_reaper(move workers: List<Thread<bool>>,
     })
 }
 
+class PoolSendGuard {
+    pool: WorkerPool
+    active: bool = true
+
+    fn init(pool: WorkerPool) { self.pool = pool }
+
+    fn finish() {
+        if !self.active { return }
+        self.active = false
+        self.pool.sender_finished()
+    }
+}
+
+fn make_pool_work<T implements Send>(
+        move job: send fn() -> T,
+        finished: Channel<T>) -> send fn() {
+    return fn() move(job) {
+        finished.send(job())
+    }
+}
+
+fn pool_result<T implements Send>(move received: Option<T>) -> Result<T> {
+    if received.is_none() {
+        return err("the worker stopped without a result", "worker")
+    }
+    return ok((move received).expect("worker result"))
+}
+
 /// A fixed crew for blocking or CPU-heavy work. `execute` parks only the
 /// calling async handler; a pool thread runs the job and returns its value.
 pub class WorkerPool {
@@ -67,6 +95,16 @@ pub class WorkerPool {
         return ok(true)
     }
 
+    fn sender_finished() {
+        self.pending_sends -= 1
+        if self.pending_sends == 0 { self.senders_drained.set() }
+    }
+
+    fn release_close() {
+        self.close_running = false
+        self.close_released.set()
+    }
+
     pub static fn start(workers: int,
                         queue_depth: int = 256) -> Result<WorkerPool> {
         if workers <= 0 || queue_depth <= 0 {
@@ -88,30 +126,16 @@ pub class WorkerPool {
         Result<T> {
         if self.closing { return err("the worker pool is closed", "closed") }
         let finished: Channel<T> = new Channel(1)
-        let work: send fn() = fn() move(job) {
-            finished.send(job())
-        }
+        let work: send fn() = make_pool_work(move job, finished)
         if self.pending_sends == 0 {
             self.senders_drained = new aio.Event()
         }
         self.pending_sends += 1
-        var sending: bool = true
-        defer {
-            if sending {
-                self.pending_sends -= 1
-                if self.pending_sends == 0 { self.senders_drained.set() }
-            }
-        }
+        let send_guard: PoolSendGuard = new PoolSendGuard(self)
+        defer send_guard.finish()
         await self.jobs.send_async(move work)
-        sending = false
-        self.pending_sends -= 1
-        if self.pending_sends == 0 { self.senders_drained.set() }
-        match await finished.receive_async() {
-            some(value) => { return ok(move value) }
-            none => {
-                return err("the worker stopped without a result", "worker")
-            }
-        }
+        send_guard.finish()
+        return pool_result(await finished.receive_async())
     }
 
     /// Closes the queue, drains accepted work, and asynchronously joins the
@@ -126,10 +150,7 @@ pub class WorkerPool {
         }
         self.close_running = true
         self.close_released = new aio.Event()
-        defer {
-            self.close_running = false
-            self.close_released.set()
-        }
+        defer self.release_close()
 
         self.closing = true
         if self.pending_sends > 0 {
