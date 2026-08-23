@@ -26,12 +26,15 @@ fn isolation_client(port: int,
         "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .expect("slow write")
     started.receive().expect("slow started")
+    let fast_started: int = time.monotonic_nanos()
     let fast: string = request(port, "/fast")
+    let fast_elapsed: int = time.monotonic_nanos() - fast_started
+    time.sleep_millis(500)
     release.set()
     let slow_reply: string =
         slow.read_to_end(65536).expect("slow read").to_string()
     control.stop().expect("stop")
-    return "fast {fast.ends_with("fast")} slow {slow_reply.ends_with("slow")}"
+    return "fast {fast.ends_with("fast")} under100 {fast_elapsed < 100000000} slow {slow_reply.ends_with("slow")}"
 }
 
 async fn isolation() -> Result<bool> {
@@ -66,7 +69,7 @@ async fn isolation() -> Result<bool> {
 fn graceful_client(port: int,
                    control: espresso.ServerControl,
                    started: Channel<bool>,
-                   release: aio.Event) -> bool {
+                   release: aio.Event) -> string {
     let stream: net.TcpStream = net.TcpStream.connect_timeout(
         "127.0.0.1", port, 3000).expect("connect")
     stream.write_text(
@@ -74,10 +77,18 @@ fn graceful_client(port: int,
         .expect("write")
     started.receive().expect("started")
     control.stop().expect("stop")
-    time.sleep_millis(20)
+    time.sleep_millis(50)
+    var refused: bool = false
+    match net.TcpStream.connect_timeout("127.0.0.1", port, 100) {
+        ok(unwanted) => {
+            let ignored: Result<bool> = unwanted.close()
+        }
+        err(_) => { refused = true }
+    }
     release.set()
-    return stream.read_to_end(65536).expect("read").to_string()
+    let completed: bool = stream.read_to_end(65536).expect("read").to_string()
         .ends_with("finished")
+    return "completed {completed} refused {refused}"
 }
 
 async fn graceful_completion() -> Result<bool> {
@@ -98,12 +109,12 @@ async fn graceful_completion() -> Result<bool> {
     let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
     let port: int = server.port()?
     let control: espresso.ServerControl = server.control()
-    let client: Thread<bool> = thread.spawn(fn() -> bool {
+    let client: Thread<string> = thread.spawn(fn() -> string {
         return graceful_client(port, control, started, release)
     })
     let stats: espresso.ServerStats = await server.run()?
     io.println(
-        "grace completed {(await client.join_async())?} responses {stats.responses}")
+        "grace {(await client.join_async())?} responses {stats.responses}")
     return ok(true)
 }
 
@@ -196,6 +207,37 @@ async fn timeout_case(request_timeout_ms: int,
     return await client.join_async()
 }
 
+fn partial_timeout_client(port: int,
+                          control: espresso.ServerControl) -> bool {
+    let response: string = request(port, "/partial")
+    control.stop().expect("stop")
+    return response.contains("503 Service Unavailable") &&
+        !response.contains("200 OK") && !response.contains("partial")
+}
+
+async fn partial_timeout() -> Result<bool> {
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build()?
+    app.get("/partial", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        context.response.text(200, "OK", "partial")
+        await aio.sleep_millis(75)
+        return espresso.detached()
+    })?
+    let options: espresso.ServerOptions = new espresso.ServerOptions()
+    options.port = 0
+    options.request_timeout_ms = 25
+    let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
+    let port: int = server.port()?
+    let control: espresso.ServerControl = server.control()
+    let client: Thread<bool> = thread.spawn(fn() -> bool {
+        return partial_timeout_client(port, control)
+    })
+    let ignored: espresso.ServerStats = await server.run()?
+    return await client.join_async()
+}
+
 async fn main() {
     (await isolation()).expect("isolation")
     (await graceful_completion()).expect("grace")
@@ -204,4 +246,5 @@ async fn main() {
     let old_only: int = (await timeout_case(0, 25, 75)).expect("old timeout")
     let new_wins: int = (await timeout_case(150, 25, 75)).expect("new timeout")
     io.println("timeouts old {old_only} new {new_wins}")
+    io.println("partial timeout {(await partial_timeout()).expect("partial")}")
 }

@@ -28,7 +28,7 @@ if [[ -n ${BEANS_ROOT:-} && "$BEANSC" == "$BEANS_ROOT/build/beansc" ]]; then
     cd "$BEANS_ROOT"
 fi
 
-cases=(di routing config_logging features fuzz server defer docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict async_pipeline pool_async server_async)
+cases=(di routing config_logging features fuzz server defer docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict async_pipeline pool_async server_async serve_async)
 for name in "${cases[@]}"; do
     "$BEANSC" run "$ROOT/tests/$name.b" >"$tmp/$name.interp"
     diff -u "$ROOT/tests/$name.out" "$tmp/$name.interp"

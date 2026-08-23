@@ -1,5 +1,6 @@
-isolation fast true slow true peak 2
-grace completed true responses 1
+isolation fast true under100 true slow true peak 2
+grace completed true refused true responses 1
 forced canceled true closed true responses 0
 pre-stopped accepted 0
 timeouts old 503 new 200
+partial timeout true
