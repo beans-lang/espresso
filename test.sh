@@ -3,6 +3,8 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 
+python3 "$ROOT/tests/api_surface.py" "$ROOT"
+
 # A compiler built from a Beans checkout resolves the standard library and
 # runtime relative to that checkout, so those runs happen from its root. An
 # installed beansc carries its own, and runs from anywhere.
