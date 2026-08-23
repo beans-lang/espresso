@@ -135,5 +135,6 @@ async fn main() {
         ok(_) => { io.println("serve unexpectedly succeeded") }
         err(problem) => { io.println("serve stopped {problem.kind}") }
     }
-    io.println("serve live {(await successful_workers()).expect("workers")}")
+    let live_workers: string = (await successful_workers()).expect("workers")
+    io.println("serve live {live_workers}")
 }

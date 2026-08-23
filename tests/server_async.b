@@ -84,7 +84,8 @@ async fn isolation() -> Result<bool> {
         return isolation_client(port, control, started, release)
     })
     let stats: espresso.ServerStats = await server.run()?
-    io.println("isolation {(await client.join_async())?} peak {stats.active_peak}")
+    let isolation: string = (await client.join_async())?
+    io.println("isolation {isolation} peak {stats.active_peak}")
     return ok(true)
 }
 
@@ -135,8 +136,9 @@ async fn graceful_completion() -> Result<bool> {
         return graceful_client(port, control, started, release)
     })
     let stats: espresso.ServerStats = await server.run()?
+    let graced: string = (await client.join_async())?
     io.println(
-        "grace {(await client.join_async())?} responses {stats.responses}")
+        "grace {graced} responses {stats.responses}")
     return ok(true)
 }
 
@@ -178,8 +180,9 @@ async fn forced_shutdown() -> Result<bool> {
         return forced_client(port, control, started)
     })
     let stats: espresso.ServerStats = await server.run()?
+    let closed: bool = (await client.join_async())?
     io.println(
-        "forced canceled {canceled.is_set()} closed {(await client.join_async())?} responses {stats.responses}")
+        "forced canceled {canceled.is_set()} closed {closed} responses {stats.responses}")
     return ok(true)
 }
 
@@ -301,6 +304,8 @@ async fn main() {
     let old_only: int = (await timeout_case(0, 25, 75)).expect("old timeout")
     let new_wins: int = (await timeout_case(150, 25, 75)).expect("new timeout")
     io.println("timeouts old {old_only} new {new_wins}")
-    io.println("partial timeout {(await partial_timeout()).expect("partial")}")
-    io.println("cancel run {(await canceled_run()).expect("cancel run")}")
+    let partial: bool = (await partial_timeout()).expect("partial")
+    io.println("partial timeout {partial}")
+    let cancel_ran: string = (await canceled_run()).expect("cancel run")
+    io.println("cancel run {cancel_ran}")
 }

@@ -41,7 +41,8 @@ async fn main_app() -> Result<bool> {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     builder.services.singleton<GreetingService>()?
-    io.println("controllers registered {espresso.add_controllers(builder)?}")
+    let registered: int = espresso.add_controllers(builder)?
+    io.println("controllers registered {registered}")
     let app: espresso.WebApplication = builder.build()?
 
     let cors_options: espresso.CorsOptions = new espresso.CorsOptions()
@@ -52,7 +53,8 @@ async fn main_app() -> Result<bool> {
             next: async fn(espresso.HttpContext) -> Result<bool>) -> Result<bool> {
         return await espresso.security_headers(context, next)
     })?
-    io.println("controllers mapped {espresso.map_controllers(app)?}")
+    let mapped: int = espresso.map_controllers(app)?
+    io.println("controllers mapped {mapped}")
     app.get_sync("/validate", validate)?
     espresso.map_openapi(app, "/openapi.json", "Beans API", "1.0")?
 
