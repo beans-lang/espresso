@@ -749,15 +749,23 @@ pub unique class WebServer {
                             }
                             none => {}
                         }
+                        var accept_transient: bool = false
                         match accepted {
                             err(problem) => {
-                                failed_message = problem.msg
-                                failed_kind = problem.kind
-                                accept_failed = true
+                                // a handshake torn down while queued
+                                // surfaces as a reset; only a closed
+                                // listener ends accepting
+                                if problem.kind == "closed" {
+                                    failed_message = problem.msg
+                                    failed_kind = problem.kind
+                                    accept_failed = true
+                                } else {
+                                    accept_transient = true
+                                }
                             }
                             ok(_) => {}
                         }
-                        if accept_failed { break }
+                        if accept_failed || accept_transient { break }
                         let pending: Option<net.TcpStream> =
                             (move accepted).expect("accept result")
                         if pending.is_none() { break }

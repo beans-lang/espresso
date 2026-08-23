@@ -336,7 +336,19 @@ fn spawn_acceptor(
             var turn: int = 0
             for !shutdown.load(MemoryOrder.acquire) {
                 var accepted: Result<net.TcpStream> = listener.accept()
-                if !accepted.is_ok() { break }
+                if !accepted.is_ok() {
+                    // a handshake torn down while queued surfaces as a
+                    // reset here; only a closed listener ends accepting
+                    var closed_now: bool = false
+                    match accepted {
+                        err(problem) => {
+                            closed_now = problem.kind == "closed"
+                        }
+                        ok(_) => {}
+                    }
+                    if closed_now { break }
+                    continue
+                }
                 if shutdown.load(MemoryOrder.acquire) { break }
                 let stream: net.TcpStream =
                     (move accepted).expect("accepted stream")

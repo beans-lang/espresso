@@ -1,6 +1,7 @@
 package main
 
 import espresso
+import std.io
 import std.os
 
 // The wrk workload: four workers behind the acceptor handoff, one
@@ -34,5 +35,10 @@ async fn main() {
     for index: int in 0..workers {
         factories.push(build_app)
     }
-    (await espresso.serve(options, move factories)).expect("serve")
+    match await espresso.serve(options, move factories) {
+        ok(_) => {}
+        err(problem) => {
+            io.println("serve failed: {problem.msg} ({problem.kind})")
+        }
+    }
 }
