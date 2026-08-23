@@ -212,7 +212,9 @@ the route table as OpenAPI 3.1.
 arguments; `espresso.configure_server` fills `ServerOptions` from the
 `server:` section. `server:request-timeout-ms` bounds the full request
 pipeline. The old `server:pending-timeout-ms` name is accepted for the
-0.3 release only.
+0.3 release only. On `ServerOptions`, zero leaves the new field unset;
+the effective default remains 30 seconds, and any positive new value wins
+over the deprecated field.
 
 ## Versioning
 

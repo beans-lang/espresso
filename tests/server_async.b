@@ -1,0 +1,207 @@
+package main
+
+import espresso
+import std.async as aio
+import std.io
+import std.net
+import std.thread
+import std.time
+
+fn request(port: int, target: string) -> string {
+    let stream: net.TcpStream = net.TcpStream.connect_timeout(
+        "127.0.0.1", port, 3000).expect("connect")
+    stream.write_text(
+        "GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write")
+    return stream.read_to_end(65536).expect("read").to_string()
+}
+
+fn isolation_client(port: int,
+                    control: espresso.ServerControl,
+                    started: Channel<bool>,
+                    release: aio.Event) -> string {
+    let slow: net.TcpStream = net.TcpStream.connect_timeout(
+        "127.0.0.1", port, 3000).expect("slow connect")
+    slow.write_text(
+        "GET /slow HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("slow write")
+    started.receive().expect("slow started")
+    let fast: string = request(port, "/fast")
+    release.set()
+    let slow_reply: string =
+        slow.read_to_end(65536).expect("slow read").to_string()
+    control.stop().expect("stop")
+    return "fast {fast.ends_with("fast")} slow {slow_reply.ends_with("slow")}"
+}
+
+async fn isolation() -> Result<bool> {
+    let started: Channel<bool> = new Channel(1)
+    let release: aio.Event = new aio.Event()
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build()?
+    app.get("/slow", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        started.send(true)
+        await release.wait()
+        return espresso.text("slow")
+    })?
+    app.get_sync("/fast", fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        return espresso.text("fast")
+    })?
+    let options: espresso.ServerOptions = new espresso.ServerOptions()
+    options.port = 0
+    let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
+    let port: int = server.port()?
+    let control: espresso.ServerControl = server.control()
+    let client: Thread<string> = thread.spawn(fn() -> string {
+        return isolation_client(port, control, started, release)
+    })
+    let stats: espresso.ServerStats = await server.run()?
+    io.println("isolation {(await client.join_async())?} peak {stats.active_peak}")
+    return ok(true)
+}
+
+fn graceful_client(port: int,
+                   control: espresso.ServerControl,
+                   started: Channel<bool>,
+                   release: aio.Event) -> bool {
+    let stream: net.TcpStream = net.TcpStream.connect_timeout(
+        "127.0.0.1", port, 3000).expect("connect")
+    stream.write_text(
+        "GET /work HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write")
+    started.receive().expect("started")
+    control.stop().expect("stop")
+    time.sleep_millis(20)
+    release.set()
+    return stream.read_to_end(65536).expect("read").to_string()
+        .ends_with("finished")
+}
+
+async fn graceful_completion() -> Result<bool> {
+    let started: Channel<bool> = new Channel(1)
+    let release: aio.Event = new aio.Event()
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build()?
+    app.get("/work", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        started.send(true)
+        await release.wait()
+        return espresso.text("finished")
+    })?
+    let options: espresso.ServerOptions = new espresso.ServerOptions()
+    options.port = 0
+    options.graceful_shutdown_ms = 500
+    let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
+    let port: int = server.port()?
+    let control: espresso.ServerControl = server.control()
+    let client: Thread<bool> = thread.spawn(fn() -> bool {
+        return graceful_client(port, control, started, release)
+    })
+    let stats: espresso.ServerStats = await server.run()?
+    io.println(
+        "grace completed {(await client.join_async())?} responses {stats.responses}")
+    return ok(true)
+}
+
+fn forced_client(port: int,
+                 control: espresso.ServerControl,
+                 started: Channel<bool>) -> bool {
+    let stream: net.TcpStream = net.TcpStream.connect_timeout(
+        "127.0.0.1", port, 3000).expect("connect")
+    stream.write_text(
+        "GET /park HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .expect("write")
+    started.receive().expect("started")
+    control.stop().expect("stop")
+    let response: string =
+        stream.read_to_end(65536).or(new Bytes(0)).to_string()
+    return !response.contains("200 OK")
+}
+
+async fn forced_shutdown() -> Result<bool> {
+    let started: Channel<bool> = new Channel(1)
+    let canceled: aio.Event = new aio.Event()
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build()?
+    app.get("/park", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        defer canceled.set()
+        started.send(true)
+        await aio.sleep_millis(10000)
+        return espresso.text("late")
+    })?
+    let options: espresso.ServerOptions = new espresso.ServerOptions()
+    options.port = 0
+    options.graceful_shutdown_ms = 25
+    let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
+    let port: int = server.port()?
+    let control: espresso.ServerControl = server.control()
+    let client: Thread<bool> = thread.spawn(fn() -> bool {
+        return forced_client(port, control, started)
+    })
+    let stats: espresso.ServerStats = await server.run()?
+    io.println(
+        "forced canceled {canceled.is_set()} closed {(await client.join_async())?} responses {stats.responses}")
+    return ok(true)
+}
+
+async fn stopped_before_run() -> Result<bool> {
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build()?
+    let options: espresso.ServerOptions = new espresso.ServerOptions()
+    options.port = 0
+    let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
+    server.control().stop()?
+    let stats: espresso.ServerStats = await server.run()?
+    io.println("pre-stopped accepted {stats.accepted}")
+    return ok(true)
+}
+
+fn timeout_client(port: int, control: espresso.ServerControl) -> int {
+    let response: string = request(port, "/wait")
+    control.stop().expect("stop")
+    if response.contains("503 Service Unavailable") { return 503 }
+    if response.contains("200 OK") { return 200 }
+    return 0
+}
+
+async fn timeout_case(request_timeout_ms: int,
+                      pending_timeout_ms: int,
+                      delay_ms: int) -> Result<int> {
+    let builder: espresso.WebApplicationBuilder =
+        new espresso.WebApplicationBuilder()
+    let app: espresso.WebApplication = builder.build()?
+    app.get("/wait", async fn(context: espresso.HttpContext) ->
+            Result<espresso.ActionResult> {
+        await aio.sleep_millis(delay_ms)
+        return espresso.text("ready")
+    })?
+    let options: espresso.ServerOptions = new espresso.ServerOptions()
+    options.port = 0
+    options.request_timeout_ms = request_timeout_ms
+    options.pending_timeout_ms = pending_timeout_ms
+    let server: espresso.WebServer = espresso.WebServer.bind(app, options)?
+    let port: int = server.port()?
+    let control: espresso.ServerControl = server.control()
+    let client: Thread<int> = thread.spawn(fn() -> int {
+        return timeout_client(port, control)
+    })
+    let ignored: espresso.ServerStats = await server.run()?
+    return await client.join_async()
+}
+
+async fn main() {
+    (await isolation()).expect("isolation")
+    (await graceful_completion()).expect("grace")
+    (await forced_shutdown()).expect("forced")
+    (await stopped_before_run()).expect("pre-stopped")
+    let old_only: int = (await timeout_case(0, 25, 75)).expect("old timeout")
+    let new_wins: int = (await timeout_case(150, 25, 75)).expect("new timeout")
+    io.println("timeouts old {old_only} new {new_wins}")
+}

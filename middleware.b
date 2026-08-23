@@ -28,6 +28,15 @@ pub class RequestLog implements Middleware {
         let started: int = time.monotonic_nanos()
         let result: Result<bool> = await next(context)
         let elapsed: int = time.monotonic_nanos() - started
+        var status: int = context.response.status
+        match result {
+            err(problem) => {
+                if !context.response.completed {
+                    status = if problem.kind == "bad_request" { 400 } else { 500 }
+                }
+            }
+            ok(_) => {}
+        }
         let level: log.Level = if result.is_ok() {
             log.Level.info
         } else {
@@ -37,7 +46,7 @@ pub class RequestLog implements Middleware {
             self.logger.log_fields(
                 level,
                 "{context.request.method} {context.request.path}",
-                [new log.Field("status", "{context.response.status}"),
+                [new log.Field("status", "{status}"),
                  new log.Field("durationNanos", "{elapsed}"),
                  new log.Field("traceId", context.trace_id())])
         }

@@ -14,7 +14,8 @@ pub class ServerOptions {
     pub idle_timeout_ms: int = 30000
     pub graceful_shutdown_ms: int = 10000
     /// Maximum time spent inside one request pipeline.
-    pub request_timeout_ms: int = 30000
+    /// Zero uses the 30 second default or the deprecated compatibility field.
+    pub request_timeout_ms: int = 0
     /// Deprecated in 0.3. Zero means unset. Use request_timeout_ms.
     pub pending_timeout_ms: int = 0
     pub read_buffer_bytes: int = 65536
@@ -36,7 +37,7 @@ pub class ServerOptions {
         }
         if self.backlog <= 0 || self.max_connections <= 0 ||
            self.idle_timeout_ms <= 0 || self.graceful_shutdown_ms < 0 ||
-           self.request_timeout_ms <= 0 || self.pending_timeout_ms < 0 ||
+           self.request_timeout_ms < 0 || self.pending_timeout_ms < 0 ||
            self.read_buffer_bytes <= 0 || self.max_body_bytes <= 0 ||
            self.max_response_body_bytes <= 0 ||
            self.max_pending_output_bytes <= 0 ||
@@ -49,10 +50,9 @@ pub class ServerOptions {
     }
 
     fn effective_request_timeout_ms() -> int {
-        if self.pending_timeout_ms > 0 && self.request_timeout_ms == 30000 {
-            return self.pending_timeout_ms
-        }
-        return self.request_timeout_ms
+        if self.request_timeout_ms > 0 { return self.request_timeout_ms }
+        if self.pending_timeout_ms > 0 { return self.pending_timeout_ms }
+        return 30000
     }
 }
 

@@ -26,7 +26,9 @@ Breaking async-v2 migration.
 - Middleware, `Authorizer`, and the full request pipeline are async.
 - `request_timeout_ms` replaces `pending_timeout_ms`. The old field and
   `server:pending-timeout-ms` config key remain as deprecated aliases for
-  this release. `poll_timeout_ms` and `max_events` are removed.
+  this release. Zero leaves the new field unset, the effective default is
+  still 30 seconds, and a positive new value always wins. `poll_timeout_ms`
+  and `max_events` are removed.
 - `DetachedResult` now accepts only a response already filled on the current
   context.
 

@@ -28,11 +28,16 @@ if [[ -n ${BEANS_ROOT:-} && "$BEANSC" == "$BEANS_ROOT/build/beansc" ]]; then
     cd "$BEANS_ROOT"
 fi
 
-cases=(di routing config_logging features fuzz server defer docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict)
+cases=(di routing config_logging features fuzz server defer docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict async_pipeline pool_async server_async)
 for name in "${cases[@]}"; do
     "$BEANSC" run "$ROOT/tests/$name.b" >"$tmp/$name.interp"
     diff -u "$ROOT/tests/$name.out" "$tmp/$name.interp"
 done
+
+if [[ ${ESPRESSO_SLOW:-} == 1 ]]; then
+    "$BEANSC" run "$ROOT/tests/server_scale.b" >"$tmp/server_scale.interp"
+    diff -u "$ROOT/tests/server_scale.out" "$tmp/server_scale.interp"
+fi
 
 for target in x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwin; do
     "$BEANSC" check "$ROOT/tests/server.b" --target "$target" >/dev/null
@@ -44,4 +49,4 @@ if [[ ${1:-} == "--native" ]]; then
     diff -u "$ROOT/tests/smoke.out" "$tmp/smoke.native"
 fi
 
-echo "ok espresso: interpreter, target checks${1:+, native}"
+echo "ok espresso: interpreter, target checks${1:+, native}${ESPRESSO_SLOW:+, slow}"
