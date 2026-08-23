@@ -14,6 +14,32 @@ fn spawn_pool_worker(jobs: Channel<send fn()>) -> Thread<bool> {
     })
 }
 
+fn spawn_pool_reaper(move workers: List<Thread<bool>>,
+                     done: Channel<Result<bool>>) -> Thread<bool> {
+    return thread.spawn(fn() move(workers) -> bool {
+        var failed_message: string = ""
+        var failed_kind: string = ""
+        for workers.len() > 0 {
+            let worker: Thread<bool> = workers.pop().expect("pool thread")
+            match worker.join() {
+                ok(_) => {}
+                err(problem) => {
+                    if failed_message == "" {
+                        failed_message = problem.msg
+                        failed_kind = problem.kind
+                    }
+                }
+            }
+        }
+        if failed_message == "" {
+            done.send(ok(true))
+        } else {
+            done.send(err(failed_message, failed_kind))
+        }
+        return true
+    })
+}
+
 /// A fixed crew for blocking or CPU-heavy work. `execute` parks only the
 /// calling async handler; a pool thread runs the job and returns its value.
 pub class WorkerPool {
@@ -26,12 +52,24 @@ pub class WorkerPool {
     senders_drained: aio.Event = new aio.Event()
     close_running: bool = false
     close_released: aio.Event = new aio.Event()
+    reaper_started: bool = false
+    reapers: List<Thread<bool>> = []
+    reaper_done: Channel<Result<bool>> = new Channel(1)
+    close_failed_message: string = ""
+    close_failed_kind: string = ""
 
     fn init(jobs: Channel<send fn()>, move crew: List<Thread<bool>>) {
         self.jobs = jobs
         self.crew = move crew
         self.senders_drained.set()
         self.close_released.set()
+    }
+
+    fn cached_close_result() -> Result<bool> {
+        if self.close_failed_message != "" {
+            return err(self.close_failed_message, self.close_failed_kind)
+        }
+        return ok(true)
     }
 
     pub static fn start(workers: int,
@@ -84,12 +122,12 @@ pub class WorkerPool {
     /// Closes the queue, drains accepted work, and asynchronously joins the
     /// fixed crew.
     pub async fn close() -> Result<bool> {
-        if self.closed { return ok(true) }
+        if self.closed { return self.cached_close_result() }
 
         for self.close_running {
             let released: aio.Event = self.close_released
             await released.wait()
-            if self.closed { return ok(true) }
+            if self.closed { return self.cached_close_result() }
         }
         self.close_running = true
         self.close_released = new aio.Event()
@@ -107,17 +145,45 @@ pub class WorkerPool {
             self.jobs.close()
             self.jobs_closed = true
         }
-        for self.crew.len() > 0 {
-            let worker: Thread<bool> = self.crew.pop().expect("pool thread")
-            var joined: bool = false
-            defer {
-                if !joined { self.crew.push(move worker) }
+        if !self.reaper_started {
+            var workers: List<Thread<bool>> = []
+            for self.crew.len() > 0 {
+                workers.push(self.crew.pop().expect("pool thread"))
             }
-            let result: Result<bool> = await worker.join_async()
-            joined = true
-            result?
+            self.reapers.push(spawn_pool_reaper(
+                move workers, self.reaper_done))
+            self.reaper_started = true
+        }
+        match await self.reaper_done.receive_async() {
+            some(result) => {
+                match result {
+                    ok(_) => {}
+                    err(problem) => {
+                        self.close_failed_message = problem.msg
+                        self.close_failed_kind = problem.kind
+                    }
+                }
+            }
+            none => {
+                self.close_failed_message =
+                    "the worker reaper stopped without a result"
+                self.close_failed_kind = "worker"
+            }
+        }
+        if self.reapers.len() > 0 {
+            let reaper: Thread<bool> =
+                self.reapers.pop().expect("pool reaper")
+            match reaper.join() {
+                ok(_) => {}
+                err(problem) => {
+                    if self.close_failed_message == "" {
+                        self.close_failed_message = problem.msg
+                        self.close_failed_kind = problem.kind
+                    }
+                }
+            }
         }
         self.closed = true
-        return ok(true)
+        return self.cached_close_result()
     }
 }

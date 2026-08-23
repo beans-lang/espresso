@@ -63,12 +63,38 @@ async fn main() {
     tasks.cancel_all()
 
     gate.send(true)
-    (await pool.close()).expect("resumed close")
+    let closers: aio.TaskGroup<string> = new aio.TaskGroup<string>()
+    closers.start(close_pool(pool))
+    closers.start(close_pool(pool))
+    let closes: List<string> = await closers.wait_all()
     let first: int = order.receive().expect("first")
     let second: int = order.receive().expect("second")
     let twice: bool = (await pool.close()).expect("second close")
     io.println("backpressure rejected {rejected}")
     io.println(
         "cancel late {ran.load(MemoryOrder.relaxed)} fifo {first},{second}")
-    io.println("close twice {twice}")
+    io.println("close concurrent {closes.join(",")} twice {twice}")
+
+    // This close reaches the reaper wait before cancellation. The next close
+    // must keep waiting on the same stored reaper and cached completion.
+    let retry_pool: espresso.WorkerPool =
+        espresso.WorkerPool.start(1, 1).expect("retry pool")
+    let retry_gate: Channel<bool> = new Channel(1)
+    let retry_started: Channel<bool> = new Channel(1)
+    let retry_job: aio.TaskGroup<string> = new aio.TaskGroup<string>()
+    retry_job.start(run_job(retry_pool, send fn() -> int {
+        retry_started.send(true)
+        retry_gate.receive().expect("retry gate")
+        return 7
+    }))
+    let ignored_retry_job: Option<string> = retry_job.try_next()
+    (await retry_started.receive_async()).expect("retry started")
+    let abandoned_close: aio.TaskGroup<string> = new aio.TaskGroup<string>()
+    abandoned_close.start(close_pool(retry_pool))
+    let ignored_abandoned: Option<string> = abandoned_close.try_next()
+    abandoned_close.cancel_all()
+    retry_gate.send(true)
+    let retried: bool = (await retry_pool.close()).expect("retry close")
+    let ignored_result: List<string> = await retry_job.wait_all()
+    io.println("reaper retry {retried}")
 }
