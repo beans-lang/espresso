@@ -325,9 +325,10 @@ pub class HttpContext {
     scope_active: bool = false
     trace_seq: int = 0
     trace_text: string = ""
-    mailbox: Option<LoopMailbox> = none
-    mail_token: int = 0
-    mail_generation: int = 0
+    // True only under the espresso server loop; respond_later refuses
+    // everywhere else (a TestHost request has no connection to defer).
+    armed: bool = false
+    reply: Option<Channel<Completion>> = none
     deferred: bool = false
 
     pub fn init(move request: HttpRequest,
@@ -351,37 +352,41 @@ pub class HttpContext {
         self.trace_seq = sequence
         self.trace_text = ""
         self.deferred = false
+        self.reply = none
         return self.request.begin(head)
     }
 
-    // The server loop stamps each request with its connection's mailbox
-    // coordinates before dispatch; `respond_later` needs them.
-    fn arm(mailbox: LoopMailbox, token: int, generation: int) {
-        self.mailbox = some(mailbox)
-        self.mail_token = token
-        self.mail_generation = generation
+    // The connection fiber arms its context once; the flag is all
+    // `respond_later` needs now that the reply channel is per-request.
+    fn arm_serving() {
+        self.armed = true
+    }
+
+    // The connection fiber takes the reply channel to wait on it; taking it
+    // resets the slot so the next request starts clean.
+    fn take_reply() -> Option<Channel<Completion>> {
+        let taken: Option<Channel<Completion>> = self.reply
+        self.reply = none
+        return taken
     }
 
     /// Marks this request deferred and returns the move-only, Send handle
-    /// that finishes it from any thread. The connection stops reading until
+    /// that finishes it from any thread. The connection fiber waits until
     /// the responder answers or the pending timeout fires, so response order
     /// stays safe even under pipelining. One responder per request.
     pub fn respond_later() -> Result<Responder> {
         if self.deferred {
             return err("this request already has a responder", "deferred")
         }
-        match self.mailbox {
-            some(mail) => {
-                self.deferred = true
-                return ok(new Responder(
-                    mail, self.mail_token, self.mail_generation))
-            }
-            none => {
-                return err(
-                    "deferred responses need the espresso server loop",
-                    "deferred")
-            }
+        if !self.armed {
+            return err(
+                "deferred responses need the espresso server loop",
+                "deferred")
         }
+        self.deferred = true
+        let reply: Channel<Completion> = new Channel(1)
+        self.reply = some(reply)
+        return ok(new Responder(reply))
     }
 
     fn open_scope() -> Result<bool> {

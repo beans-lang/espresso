@@ -1,49 +1,47 @@
 package espresso
 
-import std.poll
-
-// One finished deferred response, carried from any thread back to the event
-// loop that owns the connection. `token` and `generation` name the exact
-// request the payload answers; a stale pair makes the payload a no-op.
-struct Completion {
-    token: int
-    generation: int
+/// One finished deferred response, carried from any thread back to the
+/// connection fiber that owns the request. It travels through a one-slot
+/// channel created for exactly one request, so there is no request id to
+/// match and nothing for a late payload to corrupt: a response that arrives
+/// after the pending timeout lands in an orphaned channel and is collected
+/// with it.
+unique class Completion implements Send {
     status: int
     reason: string
     content_type: string
     header_names: List<string>
     header_values: List<string>
     body: Bytes
-}
 
-// Where deferred responses land: the owning loop's completion queue plus the
-// wake handle that tells its poller to drain. Copyable and Send, so a
-// Responder can carry it into a worker thread.
-struct LoopMailbox {
-    completions: Mutex<List<Completion>>
-    // Raised after a push, lowered by the drain — the loop skips the mailbox
-    // lock on the many cycles where nothing deferred has landed.
-    flagged: Atomic<bool>
-    signal: int
+    fn init(status: int,
+            reason: string,
+            content_type: string,
+            move header_names: List<string>,
+            move header_values: List<string>,
+            move body: Bytes) {
+        self.status = status
+        self.reason = reason
+        self.content_type = content_type
+        self.header_names = move header_names
+        self.header_values = move header_values
+        self.body = move body
+    }
 }
 
 /// The move-only, Send half of one deferred response. A handler obtains it
 /// with `context.respond_later()`, moves it wherever the work happens, and
 /// finishes the request by calling exactly one sending method. Late or
-/// repeated sends are harmless: the loop drops any payload whose request is
-/// already answered or whose connection is gone.
+/// repeated sends are harmless: the one-shot flag refuses a second send, and
+/// a payload for a request that timed out sinks into its orphaned channel.
 pub unique class Responder implements Send {
-    mailbox: LoopMailbox
-    token: int
-    generation: int
+    reply: Channel<Completion>
     sent: bool = false
     header_names: List<string> = []
     header_values: List<string> = []
 
-    fn init(mailbox: LoopMailbox, token: int, generation: int) {
-        self.mailbox = mailbox
-        self.token = token
-        self.generation = generation
+    fn init(reply: Channel<Completion>) {
+        self.reply = reply
     }
 
     /// Adds a header to the eventual response. Content-Length and Connection
@@ -85,26 +83,11 @@ pub unique class Responder implements Send {
             names.push(self.header_names[index])
             values.push(self.header_values[index])
         }
-        var carrier: List<Completion> = []
-        carrier.push(Completion {
-            token: self.token,
-            generation: self.generation,
-            status: status,
-            reason: reason,
-            content_type: content_type,
-            header_names: move names,
-            header_values: move values,
-            body: move body,
-        })
-        self.mailbox.completions.with_lock(fn(waiting: List<Completion>) {
-            let next: Option<Completion> = carrier.pop()
-            if !next.is_none() {
-                waiting.push((move next).expect("completion"))
-            }
-        })
-        // Raise the flag only after the payload is in the queue, and wake only
-        // after the flag: the drain the wake triggers must see both.
-        self.mailbox.flagged.store(true, MemoryOrder.release)
-        return poll.wake(self.mailbox.signal)
+        // The channel holds one slot and this is its only send, so the send
+        // never blocks; the waiting connection fiber wakes on its next poll.
+        self.reply.send(new Completion(
+            status, reason, content_type,
+            move names, move values, move body))
+        return ok(true)
     }
 }

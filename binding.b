@@ -744,10 +744,9 @@ fn build_action_plan(controller: reflect.Type,
                      marker: Option<reflect.Annotation>,
                      controller_filters: List<reflect.Annotation>,
                      binder: Binder) -> Result<ActionPlan> {
-    if !action.is_public() || action.is_static() ||
-       action.is_async() || action.is_generic() {
+    if !action.is_public() || action.is_static() || action.is_generic() {
         return err(
-            "controller action {action.name()} must be public, synchronous, instance, and non-generic",
+            "controller action {action.name()} must be public, instance, and non-generic",
             "controller")
     }
     if action.result_type().qualified_name() !=

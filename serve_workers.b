@@ -1,7 +1,6 @@
 package espresso
 
 import std.net
-import std.poll
 import std.thread
 
 // Every option a worker needs after binding, flattened into Send scalars —
@@ -13,6 +12,7 @@ struct WorkerLimits {
     poll_timeout_ms: int
     idle_timeout_ms: int
     graceful_shutdown_ms: int
+    pending_timeout_ms: int
     read_buffer_bytes: int
     max_body_bytes: int
     max_response_body_bytes: int
@@ -33,6 +33,7 @@ struct WorkerLimits {
         built.poll_timeout_ms = self.poll_timeout_ms
         built.idle_timeout_ms = self.idle_timeout_ms
         built.graceful_shutdown_ms = self.graceful_shutdown_ms
+        built.pending_timeout_ms = self.pending_timeout_ms
         built.read_buffer_bytes = self.read_buffer_bytes
         built.max_body_bytes = self.max_body_bytes
         built.max_response_body_bytes = self.max_response_body_bytes
@@ -54,6 +55,7 @@ fn worker_limits(options: ServerOptions) -> WorkerLimits {
         poll_timeout_ms: options.poll_timeout_ms,
         idle_timeout_ms: options.idle_timeout_ms,
         graceful_shutdown_ms: options.graceful_shutdown_ms,
+        pending_timeout_ms: options.pending_timeout_ms,
         read_buffer_bytes: options.read_buffer_bytes,
         max_body_bytes: options.max_body_bytes,
         max_response_body_bytes: options.max_response_body_bytes,
@@ -66,44 +68,34 @@ fn worker_limits(options: ServerOptions) -> WorkerLimits {
     }
 }
 
-// One serving worker. It owns an event loop bound to a throwaway port and
-// receives its real connections from the acceptor through `intake`; the
-// acceptor learns the worker's stop-and-wake handle from `controls`.
-// Spawning lives in its own function so the closure moves function
-// parameters, which the checker allows where loop-locals are refused.
-// A control whose negative signal tells the acceptor this worker never
-// started; the acceptor then refuses the whole serve run.
-fn failed_control() -> ServerControl {
-    return ServerControl {
-        stopping: new Atomic<bool>(true),
-        signal: -1,
-    }
-}
-
+// One serving worker. Its first brew promotes the thread to a fiber
+// worker; connections arrive from the acceptor through `feed` and closing
+// the feed is the stop signal. Spawning lives in its own function so the
+// closure captures function parameters, which the checker allows where
+// loop-locals are refused.
 fn spawn_worker(
         limits: WorkerLimits,
-        intake: IntakeQueue,
-        controls: Channel<ServerControl>,
+        feed: Channel<net.TcpStream>,
+        started: Channel<bool>,
         move factory: send fn() -> Result<WebApplication>) -> Thread<Result<bool>> {
     return thread.spawn(fn() move(factory) -> Result<bool> {
         match factory() {
             ok(app) => {
-                match WebServer.bind(
-                        app, limits.to_options("127.0.0.1", 0)) {
+                match WebServer.fed(
+                        app, limits.to_options("127.0.0.1", 0), feed) {
                     ok(server) => {
-                        server.set_intake(intake)
-                        controls.send(server.control())
+                        started.send(true)
                         server.run()?
                         return ok(true)
                     }
                     err(problem) => {
-                        controls.send(failed_control())
+                        started.send(false)
                         return err(problem.msg, problem.kind)
                     }
                 }
             }
             err(problem) => {
-                controls.send(failed_control())
+                started.send(false)
                 return err(problem.msg, problem.kind)
             }
         }
@@ -122,12 +114,12 @@ pub fn recommended_workers() -> int {
     return 1
 }
 
-/// Runs one acceptor plus one serving event loop per factory, all answering
-/// on a single port. The calling thread owns the listening socket and deals
-/// each connection to the workers round-robin; every worker owns an
-/// independent application, service graph, and poller, so requests never
-/// contend on shared state. One factory serves from the calling thread
-/// alone. Blocks until the workers return.
+/// Runs one acceptor plus one serving worker per factory, all answering on
+/// a single port. The calling thread owns the listening socket and deals
+/// each connection to the workers round-robin through their feed channels;
+/// every worker owns an independent application, service graph, and fiber
+/// scheduler, so requests never contend on shared state. One factory
+/// serves from the calling thread alone. Blocks until the workers return.
 pub fn serve(
         options: ServerOptions,
         move factories: List<send fn() -> Result<WebApplication>>) -> Result<bool> {
@@ -147,29 +139,24 @@ pub fn serve(
 
     let worker_count: int = factories.len()
     let limits: WorkerLimits = worker_limits(options)
-    let handshake: Channel<ServerControl> = new Channel(worker_count)
+    let started: Channel<bool> = new Channel(worker_count)
 
-    var intakes: List<IntakeQueue> = []
+    var feeds: List<Channel<net.TcpStream>> = []
     var workers: List<Thread<Result<bool>>> = []
     for index: int in 0..worker_count {
-        let intake: IntakeQueue = IntakeQueue {
-            streams: new Mutex([]),
-            flagged: new Atomic<bool>(false),
-        }
-        intakes.push(intake)
+        let feed: Channel<net.TcpStream> = new Channel(256)
+        feeds.push(feed)
         let factory: send fn() -> Result<WebApplication> =
             factories.pop().expect("worker factory")
         workers.push(spawn_worker(
-            limits, intakes[index], handshake, move factory))
+            limits, feeds[index], started, move factory))
     }
 
-    var controls: List<ServerControl> = []
     var startup_broken: bool = false
     for index: int in 0..worker_count {
-        match handshake.receive() {
-            some(control) => {
-                if control.signal < 0 { startup_broken = true }
-                controls.push(control)
+        match started.receive() {
+            some(fine) => {
+                if !fine { startup_broken = true }
             }
             none => { startup_broken = true }
         }
@@ -178,11 +165,11 @@ pub fn serve(
     var failed: Option<Error> = none
     if !startup_broken {
         // The acceptor. Ownership of every connection passes through this
-        // loop exactly once: accept, push under the worker's lock, wake it.
+        // loop exactly once: accept, send into the worker's feed. A full
+        // feed makes the send wait — backpressure, never loss.
         match net.TcpListener.bind_with_backlog(
                 options.host, options.port, options.backlog) {
             ok(listener) => {
-                var carrier: List<net.TcpStream> = []
                 var turn: int = 0
                 for {
                     let accepted: Result<net.TcpStream> = listener.accept()
@@ -195,20 +182,8 @@ pub fn serve(
                         }
                     }
                     if accept_broke { break }
-                    carrier.push((move accepted).expect("accepted stream"))
-                    intakes[turn].streams.with_lock(
-                        fn(waiting: List<net.TcpStream>) {
-                            let next: Option<net.TcpStream> = carrier.pop()
-                            if !next.is_none() {
-                                waiting.push((move next).expect(
-                                    "handoff stream"))
-                            }
-                        })
-                    // Flag after the push, wake after the flag: the drain the
-                    // wake triggers must see both.
-                    intakes[turn].flagged.store(true, MemoryOrder.release)
-                    let woken: Result<bool> =
-                        poll.wake(controls[turn].signal)
+                    feeds[turn].send(
+                        (move accepted).expect("accepted stream"))
                     turn += 1
                     if turn >= worker_count { turn = 0 }
                 }
@@ -217,12 +192,10 @@ pub fn serve(
         }
     }
 
-    // Stop every worker before judging the run: a dead acceptor with live
-    // workers would strand the port half-served.
-    for index: int in 0..controls.len() {
-        if controls[index].signal >= 0 {
-            let ignored: Result<bool> = controls[index].stop()
-        }
+    // Closing every feed stops its worker: the drain inside `run` finishes
+    // in-flight requests before the worker returns.
+    for index: int in 0..feeds.len() {
+        feeds[index].close()
     }
     for index: int in 0..workers.len() {
         let worker: Thread<Result<bool>> =

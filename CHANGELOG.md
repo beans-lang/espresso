@@ -2,6 +2,37 @@
 
 This file records user-facing changes in each Espresso release.
 
+## [Unreleased]
+
+### Changed
+
+- **One engine, on fibers.** The event-loop state machine is gone: every
+  connection is a pinned fiber that reads, parses, dispatches, and
+  flushes in a straight line, parking in the worker's netpoller between
+  requests. The interest juggling, token maps, pause/replay machinery,
+  and the acceptor's intake locks all fell out — `serve` now hands each
+  worker its connections through a plain channel, and closing the channel
+  is the stop signal. Requires Beans with fibers (`brew`/`TaskGroup`).
+- **A panicking handler now costs its request, not the server.** Each
+  request runs behind a fiber shield: a panic surfaces as the request's
+  500 with the panic message, the connection closes cleanly, and every
+  other connection keeps flowing (`tests/panic.b` is the drill).
+- **Deferred responses ride per-request channels.** `respond_later()`
+  works as before; inside, the Responder answers into a one-slot channel
+  the connection fiber waits on, so request order under pipelining holds
+  by construction, a late responder sinks into its orphaned channel, and
+  the pending timeout still answers 503. The mailbox, tokens, and
+  generations are gone.
+- Graceful shutdown wakes parked keep-alive connections by shutting their
+  reads; connections still working past `graceful_shutdown_ms` lose their
+  writes too. `poll_timeout_ms` now means how fast the accept loop
+  notices `control().stop()`.
+
+### Removed
+
+- `IntakeQueue`, `WebServer.set_intake`, and `LoopMailbox` — acceptor
+  plumbing of the old event loop with no fiber-engine counterpart.
+
 ## [0.2.0] - 2026-08-22
 
 ### Added (post-tag)
