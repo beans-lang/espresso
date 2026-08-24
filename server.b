@@ -271,17 +271,19 @@ unique class ServerConnection {
                 if self.output.len() >= options.flush_watermark_bytes {
                     await self.flush(options)?
                 }
-                var first: RequestWait = RequestWait.expired
+                var outcome: Result<bool> = ok(true)
+                var timed_out: bool = false
                 if app.fully_sync() {
                     // Every endpoint is synchronous and no middleware is
                     // registered, so the request runs as one plain call:
-                    // no task group, no timer, no state machine. A request
-                    // timeout could not preempt a synchronous handler on
-                    // the async path either — it only ever raced the group
-                    // — so the semantics are unchanged.
-                    first = RequestWait.completed(
-                        app.handle_context_sync(active))
+                    // no task group, no timer, no state machine, and no
+                    // wait wrapper. A request timeout could not preempt a
+                    // synchronous handler on the async path either — it
+                    // only ever raced the group — so the semantics are
+                    // unchanged.
+                    outcome = app.handle_context_sync(active)
                 } else {
+                    var first: RequestWait = RequestWait.expired
                     let work: aio.TaskGroup<RequestWait> =
                         new aio.TaskGroup<RequestWait>()
                     work.start(execute_request(app, active))
@@ -297,40 +299,41 @@ unique class ServerConnection {
                         }
                     }
                     work.cancel_all()
+                    match first {
+                        completed(result) => { outcome = result }
+                        expired => { timed_out = true }
+                    }
                 }
 
                 var queued: Result<bool> = ok(true)
-                match first {
-                    completed(result) => {
-                        match result {
-                            ok(_) => {
-                                queued = self.append_response(
-                                    active.response.status,
-                                    active.response.reason,
-                                    active.response.headers,
-                                    active.response.body,
-                                    active.request.keep_alive,
-                                    active.head_only,
-                                    options)
-                            }
-                            err(problem) => {
-                                let status: int =
-                                    if problem.kind == "bad_request" {
-                                        400
-                                    } else { 500 }
-                                queued = self.append_error(
-                                    status,
-                                    if status == 400 {
-                                        "Bad Request"
-                                    } else { "Internal Server Error" },
-                                    problem.msg, false, options)
-                            }
+                if timed_out {
+                    queued = self.append_error(
+                        503, "Service Unavailable",
+                        "the request timed out", false, options)
+                } else {
+                    match outcome {
+                        ok(_) => {
+                            queued = self.append_response(
+                                active.response.status,
+                                active.response.reason,
+                                active.response.headers,
+                                active.response.body,
+                                active.request.keep_alive,
+                                active.head_only,
+                                options)
                         }
-                    }
-                    expired => {
-                        queued = self.append_error(
-                            503, "Service Unavailable",
-                            "the request timed out", false, options)
+                        err(problem) => {
+                            let status: int =
+                                if problem.kind == "bad_request" {
+                                    400
+                                } else { 500 }
+                            queued = self.append_error(
+                                status,
+                                if status == 400 {
+                                    "Bad Request"
+                                } else { "Internal Server Error" },
+                                problem.msg, false, options)
+                        }
                     }
                 }
                 let closed: Result<bool> = active.close()
