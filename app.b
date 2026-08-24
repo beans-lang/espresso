@@ -174,13 +174,11 @@ pub class WebApplication {
         return context.begin(head, self.trace_sequence)
     }
 
-    /// Runs the middleware pipeline and endpoint for the request currently
-    /// held by `context`. The caller sends `context.response` afterwards and
-    /// then calls `context.close()`.
-    async fn handle_context(context: HttpContext) -> Result<bool> {
-        if self.closed { return err("the application is closed", "closed") }
-        context.open_scope()?
-        match await self.run_pipeline(context, 0) {
+    /// The shared tail of a request: shape pipeline errors into problem
+    /// responses, guarantee a completed response, stamp the Server header.
+    fn seal_context(context: HttpContext,
+                    outcome: Result<bool>) -> Result<bool> {
+        match outcome {
             ok(_) => {}
             err(problem) => {
                 if problem.kind == "bad_request" &&
@@ -206,6 +204,30 @@ pub class WebApplication {
             context.response.header("Server", self.options.server_header)
         }
         return ok(true)
+    }
+
+    /// Runs the middleware pipeline and endpoint for the request currently
+    /// held by `context`. The caller sends `context.response` afterwards and
+    /// then calls `context.close()`.
+    async fn handle_context(context: HttpContext) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        context.open_scope()?
+        let outcome: Result<bool> = await self.run_pipeline(context, 0)
+        return self.seal_context(context, outcome)
+    }
+
+    /// True while no middleware is registered and every endpoint is
+    /// synchronous — the shape `handle_context_sync` can serve.
+    fn fully_sync() -> bool {
+        return self.middleware.len() == 0 && self.router.all_sync()
+    }
+
+    /// The task-free twin of `handle_context`, valid while `fully_sync()`
+    /// holds: no middleware to thread, so the router is called directly.
+    fn handle_context_sync(context: HttpContext) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        context.open_scope()?
+        return self.seal_context(context, self.router.dispatch_sync(context))
     }
 
     /// Runs one already-parsed standard-library request through Espresso.

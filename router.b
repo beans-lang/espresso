@@ -157,6 +157,11 @@ pub class Router {
     pub fn init() {}
 
     other_static_count: int = 0
+    async_routes: int = 0
+
+    /// True while every mapped endpoint is synchronous. The server uses
+    /// this to run requests without any task machinery at all.
+    pub fn all_sync() -> bool { return self.async_routes == 0 }
 
     fn static_lookup(method: string, path: string) -> Option<int> {
         if method == "GET" { return self.static_get.get(path) }
@@ -207,6 +212,7 @@ pub class Router {
                     "route_conflict")
             }
         }
+        if route.sync_handler.is_none() { self.async_routes += 1 }
         self.index_static(route, self.routes.len())
         self.routes.push(route)
         return ok(true)
@@ -269,7 +275,10 @@ pub class Router {
         }
     }
 
-    async fn dispatch(context: HttpContext) -> Result<bool> {
+    /// Resolves the request to a route, or answers it directly (OPTIONS,
+    /// 404, 405) and returns none. Everything here is synchronous; the
+    /// dispatchers only differ in how they call the selected handler.
+    fn select(context: HttpContext) -> Result<Option<Route>> {
         let requested: string = context.request.method
 
         // Fast path: a literal request path hitting a fully static route on
@@ -283,21 +292,7 @@ pub class Router {
             match hit {
                 some(index) => {
                     context.head_only = requested == "HEAD"
-                    let route: Route = self.routes[index]
-                    var produced: Option<ActionResult> = none
-                    match route.sync_handler {
-                        some(handler) => { produced = some(handler(context)?) }
-                        none => {
-                            match route.handler {
-                                some(handler) => {
-                                    produced = some(await handler(context)?)
-                                }
-                                none => {}
-                            }
-                        }
-                    }
-                    let ready: ActionResult = produced.expect("route handler")
-                    return ready.execute(context)
+                    return ok(some(self.routes[index]))
                 }
                 none => {}
             }
@@ -325,13 +320,35 @@ pub class Router {
             allowed.sort()
             context.response.header("Allow", allowed.join(", "))
             context.response.no_content()
-            return ok(true)
+            return ok(none)
         }
 
         match selected {
             some(route) => {
                 route.capture_values(context.request)
                 context.head_only = requested == "HEAD"
+                return ok(some(route))
+            }
+            none => {}
+        }
+
+        if allowed.len() != 0 {
+            allowed.sort()
+            context.response.header("Allow", allowed.join(", "))
+            write_problem(
+                context, 405, "Method Not Allowed",
+                "No endpoint accepts {requested} for {context.request.path}")?
+            return ok(none)
+        }
+        write_problem(
+            context, 404, "Not Found",
+            "No endpoint matches {context.request.path}")?
+        return ok(none)
+    }
+
+    async fn dispatch(context: HttpContext) -> Result<bool> {
+        match self.select(context)? {
+            some(route) => {
                 var produced: Option<ActionResult> = none
                 match route.sync_handler {
                     some(handler) => { produced = some(handler(context)?) }
@@ -346,18 +363,27 @@ pub class Router {
                 }
                 return produced.expect("route handler").execute(context)
             }
-            none => {}
+            none => { return ok(true) }
         }
+    }
 
-        if allowed.len() != 0 {
-            allowed.sort()
-            context.response.header("Allow", allowed.join(", "))
-            return write_problem(
-                context, 405, "Method Not Allowed",
-                "No endpoint accepts {requested} for {context.request.path}")
+    /// The task-free twin of `dispatch`, valid while `all_sync()` holds.
+    fn dispatch_sync(context: HttpContext) -> Result<bool> {
+        match self.select(context)? {
+            some(route) => {
+                match route.sync_handler {
+                    some(handler) => {
+                        let produced: ActionResult = handler(context)?
+                        return produced.execute(context)
+                    }
+                    none => {
+                        return err(
+                            "an async endpoint needs the async dispatch",
+                            "async_route")
+                    }
+                }
+            }
+            none => { return ok(true) }
         }
-        return write_problem(
-            context, 404, "Not Found",
-            "No endpoint matches {context.request.path}")
     }
 }

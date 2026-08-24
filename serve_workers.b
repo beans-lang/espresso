@@ -226,9 +226,16 @@ fn spawn_serve_cleanup(
     })
 }
 
-/// The default remains one worker. Add workers only after measuring a
-/// CPU-bound application on its target platform.
-pub fn recommended_workers() -> int { return 1 }
+extern "C" fn beans_thread_parallelism() -> int
+
+/// One worker per hardware thread, the way every serious server runtime
+/// sizes itself. The probe never reports less than one.
+pub fn recommended_workers() -> int {
+    var count: int = 1
+    unsafe { count = beans_thread_parallelism() }
+    if count < 1 { return 1 }
+    return count
+}
 
 /// Runs one async server per factory. With several factories, one acceptor
 /// thread owns the listening socket and deals connections round-robin into

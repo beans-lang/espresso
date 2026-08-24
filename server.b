@@ -94,46 +94,17 @@ pub class ServerStats {
     pub fn init() {}
 }
 
-enum IoWait {
-    ready(live: bool)
-    expired
-}
-
-async fn read_ready(handle: int) -> IoWait {
-    return IoWait.ready(await net.readable(handle))
-}
-
-async fn write_ready(handle: int) -> IoWait {
-    return IoWait.ready(await net.writable(handle))
-}
-
-async fn io_deadline(deadline_nanos: int) -> IoWait {
-    await aio.sleep_until(deadline_nanos)
-    return IoWait.expired
-}
-
+// One parked await per wait: the runtime's deadline-fused readiness park
+// replaces the old task-group race between a readiness child and a timer
+// child. False means the deadline passed or the descriptor died — the
+// caller closes the connection either way, so the two need no telling
+// apart here.
 async fn wait_for_read(handle: int, deadline_nanos: int) -> bool {
-    let waits: aio.TaskGroup<IoWait> = new aio.TaskGroup<IoWait>()
-    waits.start(read_ready(handle))
-    waits.start(io_deadline(deadline_nanos))
-    let first: Option<IoWait> = await waits.next()
-    waits.cancel_all()
-    match first.expect("read wait") {
-        ready(live) => { return live }
-        expired => { return false }
-    }
+    return await net.readable_deadline(handle, deadline_nanos)
 }
 
 async fn wait_for_write(handle: int, deadline_nanos: int) -> bool {
-    let waits: aio.TaskGroup<IoWait> = new aio.TaskGroup<IoWait>()
-    waits.start(write_ready(handle))
-    waits.start(io_deadline(deadline_nanos))
-    let first: Option<IoWait> = await waits.next()
-    waits.cancel_all()
-    match first.expect("write wait") {
-        ready(live) => { return live }
-        expired => { return false }
-    }
+    return await net.writable_deadline(handle, deadline_nanos)
 }
 
 enum RequestWait {
@@ -300,22 +271,33 @@ unique class ServerConnection {
                 if self.output.len() >= options.flush_watermark_bytes {
                     await self.flush(options)?
                 }
-                let work: aio.TaskGroup<RequestWait> =
-                    new aio.TaskGroup<RequestWait>()
-                work.start(execute_request(app, active))
                 var first: RequestWait = RequestWait.expired
-                match work.try_next() {
-                    some(done) => { first = done }
-                    none => {
-                        work.start(request_deadline(
-                            time.monotonic_nanos() +
-                            options.effective_request_timeout_ms() *
-                                1000000))
-                        first = (await work.next())
-                            .expect("request wait")
+                if app.fully_sync() {
+                    // Every endpoint is synchronous and no middleware is
+                    // registered, so the request runs as one plain call:
+                    // no task group, no timer, no state machine. A request
+                    // timeout could not preempt a synchronous handler on
+                    // the async path either — it only ever raced the group
+                    // — so the semantics are unchanged.
+                    first = RequestWait.completed(
+                        app.handle_context_sync(active))
+                } else {
+                    let work: aio.TaskGroup<RequestWait> =
+                        new aio.TaskGroup<RequestWait>()
+                    work.start(execute_request(app, active))
+                    match work.try_next() {
+                        some(done) => { first = done }
+                        none => {
+                            work.start(request_deadline(
+                                time.monotonic_nanos() +
+                                options.effective_request_timeout_ms() *
+                                    1000000))
+                            first = (await work.next())
+                                .expect("request wait")
+                        }
                     }
+                    work.cancel_all()
                 }
-                work.cancel_all()
 
                 var queued: Result<bool> = ok(true)
                 match first {
