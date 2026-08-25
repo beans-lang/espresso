@@ -103,13 +103,12 @@ fn spawn_worker(
 }
 
 /// The worker count `serve` should be given when the caller has no stronger
-/// opinion. One: measured on macOS (arm64, 8-core), a single loop matches a
-/// four-process Bun lane's throughput at lower CPU per request, while extra
-/// workers mostly buy kernel-side contention — the platform serializes accepts
-/// through one listener regardless. Give more workers only to CPU-heavy
-/// handlers that saturate the one loop, and route blocking work through
-/// `WorkerPool` either way. Linux gets its own measured default once the
-/// Linux lane lands.
+/// opinion. One: measured on macOS (arm64, 8-core), a single loop answers at
+/// the lowest CPU per request, and extra workers mostly buy kernel-side
+/// contention — the platform serializes accepts through one listener
+/// regardless. Give more workers only to CPU-heavy handlers that saturate
+/// the one loop, and route blocking work through `WorkerPool` either way.
+/// Linux gets its own measured default once the Linux lane lands.
 pub fn recommended_workers() -> int {
     return 1
 }
