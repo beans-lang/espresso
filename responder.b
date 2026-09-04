@@ -44,6 +44,30 @@ pub unique class Responder implements Send {
         self.reply = reply
     }
 
+    // If a responder is dropped without ever answering — a handler that took
+    // it and then panicked on the connection fiber, or one that simply lost
+    // the handle — the request's connection fiber would otherwise sit in
+    // await_completion until the pending timeout (a DoS-shaped stall of up to
+    // pending_timeout_ms per abandoned request). Sending a sentinel wakes it
+    // at once with a 500. `sent` guards the normal path: after a real answer
+    // nothing is sent here. The design's one-responder-per-channel invariant
+    // means an unanswered channel is empty and capacity is one, so this send
+    // cannot block; a drop that happens after the request already timed out
+    // sinks into the orphaned channel exactly as a late real answer would.
+    fn deinit() {
+        if !self.sent {
+            self.sent = true
+            var names: List<string> = []
+            var values: List<string> = []
+            self.reply.send(new Completion(
+                500, "Internal Server Error",
+                "text/plain; charset=utf-8",
+                move names, move values,
+                Bytes.from(
+                    "the deferred response was abandoned before it was sent")))
+        }
+    }
+
     /// Adds a header to the eventual response. Content-Length and Connection
     /// stay with the server.
     pub fn header(name: string, value: string) {

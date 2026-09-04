@@ -206,6 +206,18 @@ pub class ServiceProvider {
         self.scoped_values[name] = value
     }
 
+    // Undoes the `resolving` push and `singleton_depth` bump that resolve_value
+    // made around the factory call. It runs from a defer, so it fires on the
+    // normal return, on a `?` error, and on a contained-panic unwind alike; the
+    // length guard keeps a would-be empty-list remove from turning that unwind
+    // into a fatal second panic.
+    fn leave_resolving(is_singleton: bool) {
+        if self.resolving.len() > 0 {
+            self.resolving.remove(self.resolving.len() - 1)
+        }
+        if is_singleton { self.singleton_depth -= 1 }
+    }
+
     fn descriptor(name: string) -> Result<ServiceDescriptor> {
         match self.registry.find(name) {
             some(found) => { return ok(found) }
@@ -258,16 +270,20 @@ pub class ServiceProvider {
         }
 
         self.resolving.push(name)
-        if descriptor.lifetime == ServiceLifetime.singleton {
-            self.singleton_depth += 1
-        }
-        let made: Result<reflect.Value> = descriptor.factory(self)
-        if descriptor.lifetime == ServiceLifetime.singleton {
-            self.singleton_depth -= 1
-        }
-        self.resolving.remove(self.resolving.len() - 1)
+        let is_singleton: bool =
+            descriptor.lifetime == ServiceLifetime.singleton
+        if is_singleton { self.singleton_depth += 1 }
+        // `descriptor.factory` runs a user constructor, which can panic; the
+        // espresso server brews every handler, so that panic is contained and
+        // unwinds this frame. Release the resolve bookkeeping in a defer rather
+        // than straight-line after the call — otherwise a stranded name in
+        // `resolving` makes the next resolve a false "dependency cycle", and a
+        // stuck `singleton_depth` makes the next scoped resolve a false
+        // "singleton cannot capture scoped". The defer fires on the normal
+        // return, on the `?` error path, and on the unwind, all three.
+        defer self.leave_resolving(is_singleton)
 
-        let value: reflect.Value = made?
+        let value: reflect.Value = descriptor.factory(self)?
         match descriptor.lifetime {
             singleton => { self.singletons.put(name, value) }
             scoped => { self.cache_scoped(name, value) }

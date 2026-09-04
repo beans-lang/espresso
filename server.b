@@ -359,7 +359,29 @@ unique class ServerConnection {
                             self.await_completion(
                                 active, app, options, stats)?
                         } else {
-                            let ignored: Result<bool> = active.close()
+                            // Connection policy: a handler error — a returned
+                            // `err`, or a contained panic surfacing at the
+                            // shield's join — is fatal to the connection.
+                            // append_error is told keep_alive=false, so this
+                            // response is the connection's last and it closes
+                            // afterwards. That is deliberate: it bounds
+                            // anything a half-finished request left on the
+                            // reused HttpContext — and anything a panic would
+                            // strand on a platform without the runtime unwind
+                            // (Windows; see README) — to this one connection
+                            // instead of letting the next request inherit it.
+                            //
+                            // Reclaim the request's DI scope first, best-effort
+                            // on purpose: close() is idempotent and only errors
+                            // when the scope was already released (so nothing
+                            // leaks), and the error response below must still
+                            // be framed — a close failure must not short-
+                            // circuit past it. Surface a failure in the stats
+                            // rather than swallow it.
+                            match active.close() {
+                                ok(_) => {}
+                                err(_) => { stats.connection_errors += 1 }
+                            }
                             let status: int = if problem.kind == "bad_request" {
                                 400
                             } else { 500 }

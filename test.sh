@@ -28,7 +28,7 @@ if [[ -n ${BEANS_ROOT:-} && "$BEANSC" == "$BEANS_ROOT/build/beansc" ]]; then
     cd "$BEANS_ROOT"
 fi
 
-cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date)
+cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date panic_reclaim di_panic defer_panic)
 for name in "${cases[@]}"; do
     "$BEANSC" run "$ROOT/tests/$name.b" >"$tmp/$name.interp"
     diff -u "$ROOT/tests/$name.out" "$tmp/$name.interp"
@@ -39,7 +39,11 @@ for target in x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwi
 done
 
 if [[ ${1:-} == "--native" ]]; then
-    native_cases=(smoke date)
+    # The contained-panic unwind is a native-codegen feature (the unwind pads
+    # in the LLVM backend), so the reclamation, deferred-abandon and Date
+    # suites run natively too, not only under the interpreter — the interpreter
+    # leg cannot fail the way native can.
+    native_cases=(smoke date panic_reclaim di_panic defer_panic)
     for name in "${native_cases[@]}"; do
         "$BEANSC" build "$ROOT/tests/$name.b" -o "$tmp/$name" >/dev/null
         "$tmp/$name" >"$tmp/$name.native"

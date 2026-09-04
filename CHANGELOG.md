@@ -29,6 +29,19 @@ This file records user-facing changes in each Espresso release.
   request runs behind a fiber shield: a panic surfaces as the request's
   500 with the panic message, the connection closes cleanly, and every
   other connection keeps flowing (`tests/panic.b` is the drill).
+- **A contained panic reclaims what the request held, and closes its
+  connection.** On Beans with the runtime unwind (0.1.35+), a panicking
+  handler runs its frames' `defer`s and drops its locals on the way out, so
+  buffers, files, locks and DI scope are released instead of leaked;
+  `tests/panic_reclaim.b` drives 100 panics and shows a defer-decremented
+  depth counter back at 0 and a deinit-counted resource count at 100, on
+  both backends. Closing the connection that saw the panic (already the
+  behaviour, now stated and tested) bounds anything a half-finished request
+  left on the reused `HttpContext`. **Windows has no runtime unwind yet**
+  (the beans backend emits unwind pads only for ELF/Mach-O on x86-64/arm64),
+  so on a Windows target a contained panic still abandons the frame and
+  leaks exactly as before — the containment holds, the reclamation does not,
+  until a beans-side COFF unwind lands. (#3)
 - **Deferred responses ride per-request channels.** `respond_later()`
   works as before; inside, the Responder answers into a one-slot channel
   the connection fiber waits on, so request order under pipelining holds
@@ -39,6 +52,21 @@ This file records user-facing changes in each Espresso release.
   reads; connections still working past `graceful_shutdown_ms` lose their
   writes too. `poll_timeout_ms` now means how fast the accept loop
   notices `control().stop()`.
+
+### Fixed
+
+- A deferred handler that took a `Responder` with `respond_later()` and then
+  panicked before handing it off no longer parks its connection fiber until
+  `pending_timeout_ms` (a 30s stall by default, per abandoned request). The
+  dropped Responder now wakes the waiter at once with a 500. A Responder that
+  answered normally, or that is dropped after the request already timed out,
+  is unaffected. (#3)
+- `ServiceProvider.resolve_value` releases its cycle-detection and
+  singleton-depth bookkeeping through a `defer`, so a factory (a
+  constructor) that panics no longer strands a `resolving` entry — which
+  turned the next resolve on that provider into a false "dependency cycle" —
+  or a `singleton_depth` bump — which turned the next scoped resolve into a
+  false "singleton cannot capture scoped" (`tests/di_panic.b`). (#3)
 
 ### Removed
 
