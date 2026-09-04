@@ -16,6 +16,12 @@ This file records user-facing changes in each Espresso release.
   RFC 9110's origin-server rule does not apply and a time-varying header
   would only make header assertions clock-dependent (`tests/date.b`). (#2)
 
+### Requirements
+
+- Espresso now needs **Beans 0.1.36 or newer**. `std.calendar`, which formats
+  the `Date` header, first ships in 0.1.36; the contained-panic unwind that
+  makes a panicking handler reclaim what it held first ships in 0.1.35.
+
 ### Changed
 
 - **One engine, on fibers.** The event-loop state machine is gone: every

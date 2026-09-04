@@ -232,4 +232,8 @@ This is Espresso 0.2.0, one breaking release over 0.1: handlers return
 generic instead of `type_of` pairs, `ServiceKey` is gone, logging moved
 to `std.log`, and the binding and filter annotations are new. It needs
 Beans 0.1.29 for explicit type arguments, package function values, and
-the reflection speed that makes controllers a first-class path.
+the reflection speed that makes controllers a first-class path, and
+**Beans 0.1.36 or newer** to build at all: the `Date` header is formatted
+with `std.calendar`, which first ships in 0.1.36. A contained panic
+reclaims its frame on 0.1.35 and later, within the platform limits noted
+under *The server*.
