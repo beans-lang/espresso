@@ -19,6 +19,13 @@ fn json(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     return espresso.json_text("\{\"message\":\"Hello, World!\"\}")
 }
 
+// A handler that stamps its own Date. The server must keep it and not add a
+// second one.
+fn dated(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    context.response.header("Date", "Sun, 06 Nov 1994 08:49:37 GMT")
+    return espresso.json_text("\{\"message\":\"Hello, World!\"\}")
+}
+
 fn find_at(raw: string, needle: string) -> int {
     return raw.find(needle).or(-1)
 }
@@ -87,8 +94,17 @@ fn client(port: int, control: espresso.ServerControl) -> string {
     let err_413: bool = big.contains("413 Content Too Large")
     let err_date: bool = header_value(big, "Date") != ""
 
+    // 4) A handler that set its own Date keeps it, and the server does not add
+    //    a second one.
+    let own: string = request(port,
+        "GET /dated HTTP/1.1\r\nHost: a\r\nConnection: close\r\n\r\n")
+    let own_count: int = own.split("\r\nDate: ").len() - 1
+    let own_kept: bool =
+        own_count == 1 &&
+        header_value(own, "Date") == "Sun, 06 Nov 1994 08:49:37 GMT"
+
     let stopped: bool = control.stop().or(false)
-    return "get present {get_present} block {get_block} round {get_round} canon {get_canon}\nhead present {head_present} bodyless {head_bodyless}\nerr413 {err_413} date {err_date}\nstopped {stopped}"
+    return "get present {get_present} block {get_block} round {get_round} canon {get_canon}\nhead present {head_present} bodyless {head_bodyless}\nerr413 {err_413} date {err_date}\nown kept {own_kept} count {own_count}\nstopped {stopped}"
 }
 
 fn main() {
@@ -96,6 +112,7 @@ fn main() {
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
     app.get("/json", json).expect("route")
+    app.get("/dated", dated).expect("route")
 
     let options: espresso.ServerOptions = new espresso.ServerOptions()
     options.port = 0
