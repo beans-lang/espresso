@@ -203,6 +203,22 @@ from the handler. `espresso.TestHost` runs the full pipeline in memory
 for tests, and `espresso.map_openapi(app)` serves the route table as
 OpenAPI 3.1.
 
+Every response carries a `Date` header (RFC 9110 IMF-fixdate, GMT),
+formatted once per wall-clock second and reused; a handler that sets its
+own `Date` keeps it.
+
+A panicking handler costs one request, not the connection: the request
+runs behind a fiber shield, the panic becomes that request's 500, and the
+connection closes. On Beans 0.1.35 and later the panicking frame also
+**unwinds** — its `defer`s run and its locals' `deinit`s run — so buffers,
+files, locks and the request's DI scope are released rather than leaked.
+That unwind is a native-backend feature and today it covers ELF and Mach-O
+on x86-64 and arm64. **A Windows build has no unwind yet**: containment
+still holds and the server keeps serving, but a contained panic abandons
+its frame and leaks what the request held, so a Windows deployment should
+treat a panicking handler as a resource leak until a COFF unwind lands in
+the compiler.
+
 ## Configuration
 
 `espresso.Configuration` layers defaults, files and `--key=value`
