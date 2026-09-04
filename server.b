@@ -1,5 +1,6 @@
 package espresso
 
+import std.calendar
 import std.http
 import std.net
 import std.thread
@@ -164,6 +165,11 @@ unique class ServerConnection {
     // parser for reuse only when the next head has replaced every alias to
     // it — the swap in absorb_event's head arm.
     previous_head: Option<http.Request> = none
+    // The RFC 9110 Date value, cached per wall-clock second — see http_date().
+    // This fiber is the sole toucher of a ServerConnection, so the cache needs
+    // no lock and never crosses a thread.
+    date_text: string = ""
+    date_second: int = -1
 
     fn init(move stream: net.TcpStream,
             peer: net.Address,
@@ -183,6 +189,33 @@ unique class ServerConnection {
 
     fn has_output() -> bool { return self.output.len() > 0 }
 
+    // The RFC 9110 Date value for a response framed right now, as
+    // IMF-fixdate in GMT — the only form a sender is allowed to generate.
+    // Espresso is an origin server with a clock, so it MUST send Date on
+    // 2xx/3xx/4xx and MAY on 1xx/5xx; it emits no 1xx, so "stamp it on every
+    // response" is the simplest rule that is correct on every status it
+    // produces, and append_response/append_error apply it at the one layer
+    // that reaches a socket.
+    //
+    // Formatting is once-per-second work — a civil-time conversion and a few
+    // string allocations — so the text is cached and reused for every
+    // response that lands in the same wall-clock second. The wall clock is
+    // read once per response (a vDSO clock_gettime, cheap beside the format it
+    // guards), so the value is never stale: a response that crosses a second
+    // boundary reformats before it is sent.
+    fn http_date() -> string {
+        let now_ns: int = time.wall_nanos()
+        var second: int = now_ns / 1000000000
+        // Floor toward the past, so a pre-epoch clock keeps a stable key.
+        if now_ns < 0 && now_ns % 1000000000 != 0 { second -= 1 }
+        if second != self.date_second {
+            self.date_text =
+                calendar.DateTime.from_epoch_nanos(now_ns).to_http_date()
+            self.date_second = second
+        }
+        return self.date_text
+    }
+
     fn append_response(status: int,
                        reason: string,
                        headers: http.Headers,
@@ -194,6 +227,11 @@ unique class ServerConnection {
             return self.append_error(
                 500, "Internal Server Error",
                 "response body exceeds the configured limit", false, options)
+        }
+        // RFC 9110 §6.6.1: stamp Date unless the handler set its own (the
+        // lookup is case-insensitive), so it is never emitted twice.
+        if !headers.has("Date") {
+            headers.add("Date", self.http_date())
         }
         let start: int = self.output.len()
         http.encode_response_append(
@@ -213,6 +251,8 @@ unique class ServerConnection {
                     options: ServerOptions) -> Result<bool> {
         let headers: http.Headers = new http.Headers()
         headers.add("Content-Type", "text/plain; charset=utf-8")
+        // RFC 9110 §6.6.1: an error response is 4xx or 5xx; a 4xx is a MUST.
+        headers.add("Date", self.http_date())
         let body: Bytes = Bytes.from(detail)
         http.encode_response_append(
             self.output, status, reason, headers, body, keep_alive)?

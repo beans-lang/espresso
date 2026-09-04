@@ -28,7 +28,7 @@ if [[ -n ${BEANS_ROOT:-} && "$BEANSC" == "$BEANS_ROOT/build/beansc" ]]; then
     cd "$BEANS_ROOT"
 fi
 
-cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict)
+cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date)
 for name in "${cases[@]}"; do
     "$BEANSC" run "$ROOT/tests/$name.b" >"$tmp/$name.interp"
     diff -u "$ROOT/tests/$name.out" "$tmp/$name.interp"
@@ -39,9 +39,12 @@ for target in x86_64-unknown-linux-gnu x86_64-pc-windows-gnu aarch64-apple-darwi
 done
 
 if [[ ${1:-} == "--native" ]]; then
-    "$BEANSC" build "$ROOT/tests/smoke.b" -o "$tmp/smoke" >/dev/null
-    "$tmp/smoke" >"$tmp/smoke.native"
-    diff -u "$ROOT/tests/smoke.out" "$tmp/smoke.native"
+    native_cases=(smoke date)
+    for name in "${native_cases[@]}"; do
+        "$BEANSC" build "$ROOT/tests/$name.b" -o "$tmp/$name" >/dev/null
+        "$tmp/$name" >"$tmp/$name.native"
+        diff -u "$ROOT/tests/$name.out" "$tmp/$name.native"
+    done
 fi
 
 echo "ok espresso: interpreter, target checks${1:+, native}"

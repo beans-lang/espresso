@@ -24,6 +24,14 @@ pub class TestResponse {
 }
 
 /// Runs the full app pipeline without opening a socket.
+///
+/// A TestHost response carries no `Date` header, deliberately. RFC 9110
+/// 6.6.1 is a rule for an origin server framing a message onto the wire, and
+/// espresso stamps `Date` at exactly that layer (ServerConnection.append_*).
+/// A TestHost never reaches that layer — it hands back the HttpResponse the
+/// pipeline built — so a time-varying `Date` here would only make every test
+/// that inspects response headers clock-dependent for no gain. Assert `Date`
+/// against a real socket (tests/date.b), not against this host.
 pub class TestHost {
     app: WebApplication
     closed: bool = false

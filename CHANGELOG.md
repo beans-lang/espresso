@@ -4,6 +4,18 @@ This file records user-facing changes in each Espresso release.
 
 ## [Unreleased]
 
+### Added
+
+- **Responses carry a `Date` header** (RFC 9110 §6.6.1). Every response an
+  origin server frames onto a socket now includes an IMF-fixdate `Date` in
+  GMT — on 2xx/3xx/4xx, where it is a MUST, and on 5xx too — unless the
+  handler already set its own. The value is formatted once per wall-clock
+  second and reused, so the hot path pays a cached string, not a
+  `DateTime.now()` and a format per request. `TestHost` responses do not
+  carry it on purpose: a test host never frames a message onto the wire, so
+  RFC 9110's origin-server rule does not apply and a time-varying header
+  would only make header assertions clock-dependent (`tests/date.b`). (#2)
+
 ### Changed
 
 - **One engine, on fibers.** The event-loop state machine is gone: every
