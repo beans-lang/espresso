@@ -1,2 +1,3 @@
-drill true stood true stopped true
-accepted 2 requests 3 responses 3 errors 0
+caseA leak false problemjson true traceid true status500 true stood true stopped true
+caseB shown true problemjson true traceid true stopped true
+caseC leak false recordsecret true tracematch true

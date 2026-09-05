@@ -15,12 +15,46 @@ This file records user-facing changes in each Espresso release.
   carry it on purpose: a test host never frames a message onto the wire, so
   RFC 9110's origin-server rule does not apply and a time-varying header
   would only make header assertions clock-dependent (`tests/date.b`). (#2)
+- **A failed request leaves a server-side record.** Whenever espresso hides a
+  failure's detail behind the generic production message, it first writes that
+  detail — the panic text and its `runtime panic at <line>:<col>` position, or
+  a returned `err`'s message, together with the request method and path and
+  the *same* trace id the client was handed — to a record, so
+  "use the trace id to find the server log" is a real promise rather than a
+  lie. The default sink is **stderr**: one line per failure, and because every
+  worker thread writes to stderr independently there is nothing to name and no
+  shared state to race, and it never touches a program's stdout. Set
+  `AppOptions.error_logger` to a `std.log.Logger` to route the record there
+  instead — then stderr is left alone. `RequestLog` cannot fill this role: it
+  runs *inside* the pipeline, which a panic unwinds straight past, so it logs
+  nothing for exactly the requests that failed hardest (`tests/panic.b`). (#4)
 
 ### Requirements
 
 - Espresso now needs **Beans 0.1.36 or newer**. `std.calendar`, which formats
   the `Date` header, first ships in 0.1.36; the contained-panic unwind that
   makes a panicking handler reclaim what it held first ships in 0.1.35.
+
+### Security
+
+- **A panicking handler no longer leaks its panic message or source position
+  to the client.** A handler that returned an `err` already passed the
+  `detailed_errors` gate — production got a generic detail plus a trace id, as
+  `application/problem+json`. A handler that *panicked* did not: the panic
+  unwound past that gate and the connection wrote the runtime's
+  `runtime panic at <line>:<col>: <message>` verbatim as a bare `text/plain`
+  500, so whatever the message interpolated (the reported case put a
+  connection string in it; a row id, a customer identifier, an internal
+  hostname or a file path are all ordinary things to name in a panic) and the
+  source coordinates of the running binary went to the remote client. Panics
+  are reachable from input an author never intended — an index out of range,
+  an `expect` on a `none`, an integer divide by zero — so "do not panic in a
+  handler" was never a mitigation the framework could rely on. The panic path
+  now renders through the *same* gate and the *same* problem+json shape (with
+  a `traceId`) the returned-`err` path uses: `detailed_errors` off answers the
+  generic detail and the trace id, on answers the panic text. The 400
+  `bad_request` arm of the same `dispatch` block shares the shape. A contained
+  panic is still fatal to its connection. (#4)
 
 ### Changed
 
@@ -33,8 +67,10 @@ This file records user-facing changes in each Espresso release.
   is the stop signal. Requires Beans with fibers (`brew`/`TaskGroup`).
 - **A panicking handler now costs its request, not the server.** Each
   request runs behind a fiber shield: a panic surfaces as the request's
-  500 with the panic message, the connection closes cleanly, and every
-  other connection keeps flowing (`tests/panic.b` is the drill).
+  500 — gated by `detailed_errors` exactly as a returned `err` is, so the
+  panic text and its source position stay off the wire in production (see
+  Security, #4) — the connection closes cleanly, and every other connection
+  keeps flowing (`tests/panic.b` is the drill).
 - **A contained panic reclaims what the request held, and closes its
   connection.** On Beans with the runtime unwind (0.1.35+), a panicking
   handler runs its frames' `defer`s and drops its locals on the way out, so

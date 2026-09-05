@@ -1,12 +1,23 @@
 package espresso
 
 import std.http
+import std.io
+import std.log
 import std.net
 
 /// Safe production defaults. Development may opt into detailed errors.
 pub class AppOptions {
     pub detailed_errors: bool = false
     pub server_header: string = "espresso"
+    /// Where a failed request's server-side record goes. `none` (the default)
+    /// writes it to stderr — no logger to name, no shared state to race, one
+    /// line per failure, and it never touches a program's stdout. Set a
+    /// logger to route the record into std.log instead; then stderr is left
+    /// alone. Either way the record carries the failure detail and the trace
+    /// id the client was handed, so the generic production response's promise
+    /// of a findable log is real. Naming a shared logger is the application's
+    /// concern, not espresso's.
+    pub error_logger: Option<log.Logger> = none
 
     pub fn init() {}
 }
@@ -135,19 +146,16 @@ pub class WebApplication {
         match self.run_pipeline(context, 0) {
             ok(_) => {}
             err(problem) => {
-                if problem.kind == "bad_request" &&
+                // A 500 hides its detail from the client behind the generic
+                // message, so it must be recorded server-side first —
+                // otherwise that message's promise of a findable log is a
+                // lie. A 400 shows its own detail (it describes the client's
+                // input) and needs no record.
+                if problem.kind != "bad_request" &&
                    !context.response.completed {
-                    write_problem(
-                        context, 400, "Bad Request", problem.msg)?
-                } else if !context.response.completed {
-                    let detail: string = if self.options.detailed_errors {
-                        problem.msg
-                    } else {
-                        "The request failed. Use the trace id to find the server log."
-                    }
-                    write_problem(
-                        context, 500, "Internal Server Error", detail)?
+                    self.record_failure(context, problem.msg)
                 }
+                self.write_failure(context, problem.msg, problem.kind)?
             }
         }
         // A deferred request answers through its Responder; the buffered
@@ -159,6 +167,64 @@ pub class WebApplication {
         if self.options.server_header != "" &&
            !context.response.headers.has("Server") {
             context.response.header("Server", self.options.server_header)
+        }
+        return ok(true)
+    }
+
+    // The server-side record for a failed request — the piece the generic
+    // production response promises ("use the trace id to find the server
+    // log") but that nothing wrote before. `detail` is the returned err's
+    // message, or a contained panic's "runtime panic at L:C: ..." text (which
+    // already embeds the source position); it is paired with the request line
+    // and the SAME trace id the client was handed, so an operator can
+    // correlate the log line with the response the client reports.
+    //
+    // The default sink is stderr. Every worker thread writes to stderr
+    // independently, so there is nothing to name and no shared state to race
+    // — that is what stderr is for. An application that wants structured logs
+    // sets options.error_logger; then the record goes there and stderr is
+    // left untouched, so espresso never writes to a program's stdout and a
+    // configured application keeps its own log shape. Recording is
+    // best-effort: a logging-backend failure must not fail a request whose
+    // response is already decided.
+    fn record_failure(context: HttpContext, detail: string) {
+        match self.options.error_logger {
+            some(logger) => {
+                let recorded: Result<bool> = logger.log_fields(
+                    log.Level.error, detail,
+                    [new log.Field("method", context.request.method),
+                     new log.Field("path", context.request.path),
+                     new log.Field("traceId", context.trace_id())])
+            }
+            none => {
+                io.eprintln(
+                    "[espresso] request failed traceId={context.trace_id()} {context.request.method} {context.request.path}: {detail}")
+            }
+        }
+    }
+
+    // Renders a failed pipeline into the context's response as problem+json,
+    // through the one detailed_errors gate. A 400 bad_request describes the
+    // client's own input, so it is shown as-is; every other failure — a 500,
+    // a contained panic among them — is a server internal, hidden behind the
+    // generic detail and the trace id in production. Shared by handle_context
+    // (a returned err) and the server's dispatch (a contained panic) so the
+    // two paths render the identical body and cannot drift apart again.
+    // Logging is the caller's job (record_failure), because only the
+    // hidden-detail case needs a record.
+    fn write_failure(context: HttpContext,
+                     detail: string, kind: string) -> Result<bool> {
+        if kind == "bad_request" && !context.response.completed {
+            return write_problem(context, 400, "Bad Request", detail)
+        }
+        if !context.response.completed {
+            let shown: string = if self.options.detailed_errors {
+                detail
+            } else {
+                "The request failed. Use the trace id to find the server log."
+            }
+            return write_problem(
+                context, 500, "Internal Server Error", shown)
         }
         return ok(true)
     }

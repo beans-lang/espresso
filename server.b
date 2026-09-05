@@ -350,10 +350,23 @@ unique class ServerConnection {
                         }
                     }
                     err(problem) => {
+                        // Every failure that reaches the shield's join — a
+                        // contained panic, or an error handle_context could
+                        // not render itself — is a server-side event worth a
+                        // record, deferred or not. Log it once here, with the
+                        // trace id the client will see, before the response is
+                        // decided. This is the record the generic production
+                        // message promises; without it a panic vanished
+                        // silently (RequestLog runs inside the pipeline, which
+                        // a panic unwinds straight past).
+                        app.record_failure(active, problem.msg)
                         if active.deferred {
                             // A responder is already loose in the world; the
                             // request must wait for it no matter how the
-                            // pipeline itself ended.
+                            // pipeline itself ended. The panic detail never
+                            // reaches the client here — the responder's answer
+                            // or a generic 503 does — so there is nothing to
+                            // gate beyond the record above.
                             let closed: Result<bool> = active.close()
                             closed?
                             self.await_completion(
@@ -362,7 +375,7 @@ unique class ServerConnection {
                             // Connection policy: a handler error — a returned
                             // `err`, or a contained panic surfacing at the
                             // shield's join — is fatal to the connection.
-                            // append_error is told keep_alive=false, so this
+                            // append_response is told keep_alive=false, so this
                             // response is the connection's last and it closes
                             // afterwards. That is deliberate: it bounds
                             // anything a half-finished request left on the
@@ -382,14 +395,29 @@ unique class ServerConnection {
                                 ok(_) => {}
                                 err(_) => { stats.connection_errors += 1 }
                             }
-                            let status: int = if problem.kind == "bad_request" {
-                                400
-                            } else { 500 }
-                            let reason: string = if status == 400 {
-                                "Bad Request"
-                            } else { "Internal Server Error" }
-                            self.append_error(
-                                status, reason, problem.msg, false, options)?
+                            // A contained panic leaves the response half-
+                            // written at best, so start from a clean slate and
+                            // render through the SAME gate and problem+json
+                            // shape the returned-err path uses (write_failure):
+                            // production answers the generic detail plus the
+                            // trace id, detailed_errors answers the panic text.
+                            // Never the bare panic message and never the
+                            // "runtime panic at L:C" position the old
+                            // append_error wrote straight to the wire.
+                            active.response.reset()
+                            app.write_failure(
+                                active, problem.msg, problem.kind)?
+                            if app.server_header() != "" &&
+                               !active.response.headers.has("Server") {
+                                active.response.header(
+                                    "Server", app.server_header())
+                            }
+                            self.append_response(
+                                active.response.status,
+                                active.response.reason,
+                                active.response.headers,
+                                active.response.body,
+                                false, active.head_only, options)?
                             stats.responses += 1
                         }
                     }
