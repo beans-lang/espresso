@@ -57,7 +57,7 @@ assert_panic_stderr() {
     fi
 }
 
-cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date panic_reclaim di_panic defer_panic large_body)
+cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date panic_reclaim di_panic defer_panic large_body borrow)
 for name in "${cases[@]}"; do
     if ! "$BEANSC" run "$ROOT/tests/$name.b" \
             >"$tmp/$name.interp" 2>"$tmp/$name.interp.err"; then
@@ -79,7 +79,7 @@ if [[ ${1:-} == "--native" ]]; then
     # leg cannot fail the way native can. `panic` joins them: the info-leak fix
     # rides that same unwind, and its stderr and logger records must survive
     # native codegen, not only the tree walker.
-    native_cases=(smoke date panic_reclaim di_panic defer_panic panic large_body)
+    native_cases=(smoke date panic_reclaim di_panic defer_panic panic large_body borrow)
     for name in "${native_cases[@]}"; do
         "$BEANSC" build "$ROOT/tests/$name.b" -o "$tmp/$name" >/dev/null
         if ! "$tmp/$name" >"$tmp/$name.native" 2>"$tmp/$name.native.err"; then

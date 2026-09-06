@@ -225,13 +225,31 @@ unique class ServerConnection {
         return self.date_text
     }
 
-    fn append_response(status: int,
-                       reason: string,
-                       headers: http.Headers,
-                       body: Bytes,
-                       keep_alive: bool,
-                       head_only: bool,
-                       options: ServerOptions) -> Result<bool> {
+    // Frames a finished response, in whichever form it carries its payload.
+    // Neither form copies the payload into a per-connection buffer: a small one
+    // is appended to the output queue (which keeps pipelined responses batched),
+    // a large one is sent beside its head with one vectored write.
+    fn append_response_from(response: HttpResponse,
+                            keep_alive: bool,
+                            head_only: bool,
+                            options: ServerOptions) -> Result<bool> {
+        if response.is_text_body() {
+            return self.append_response_text(
+                response.status, response.reason, response.headers,
+                response.text_payload(), keep_alive, head_only, options)
+        }
+        return self.append_response_bytes(
+            response.status, response.reason, response.headers,
+            response.body, keep_alive, head_only, options)
+    }
+
+    fn append_response_bytes(status: int,
+                             reason: string,
+                             headers: http.Headers,
+                             body: Bytes,
+                             keep_alive: bool,
+                             head_only: bool,
+                             options: ServerOptions) -> Result<bool> {
         if body.len() > options.max_response_body_bytes {
             return self.append_error(
                 500, "Internal Server Error",
@@ -271,6 +289,50 @@ unique class ServerConnection {
         return ok(true)
     }
 
+    // The string-body twin of append_response_bytes. The payload is the
+    // handler's own string, framed from its length; it is never staged in a
+    // response buffer. Below the threshold its bytes are appended straight to
+    // the output queue, above it it is sent beside the head (flush_with_text).
+    fn append_response_text(status: int,
+                            reason: string,
+                            headers: http.Headers,
+                            text: string,
+                            keep_alive: bool,
+                            head_only: bool,
+                            options: ServerOptions) -> Result<bool> {
+        if text.len() > options.max_response_body_bytes {
+            return self.append_error(
+                500, "Internal Server Error",
+                "response body exceeds the configured limit", false, options)
+        }
+        if !headers.has("Date") {
+            headers.add("Date", self.http_date())
+        }
+        let alive: bool = keep_alive && !self.close_after_write
+        if head_only {
+            http.encode_response_head_append(
+                self.output, status, reason, headers, text.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            return ok(true)
+        }
+        if text.len() >= vectored_body_min {
+            let forbidden: bool = http.encode_response_head_append(
+                self.output, status, reason, headers, text.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            if forbidden { return ok(true) }
+            return self.flush_with_text(text)
+        }
+        // Small: frame the head, then append the string's bytes into the output
+        // queue — the same wire bytes and the same single copy a Bytes body
+        // takes through encode_response_append, but read from the handler's
+        // string so nothing is staged in a response buffer first.
+        let forbidden: bool = http.encode_response_head_append(
+            self.output, status, reason, headers, text.len(), alive)?
+        if !forbidden { self.output.append_string(text) }
+        if !keep_alive { self.close_after_write = true }
+        return ok(true)
+    }
+
     // Sends the queued output and this response's body as one pair, without
     // the body ever entering the queue.
     //
@@ -295,6 +357,20 @@ unique class ServerConnection {
         }
         self.output.resize(0)
         return ok(true)
+    }
+
+    // The string twin of flush_with_body. Until TcpStream.write_vectored_text
+    // exists, the string is copied once into a fresh local buffer and sent
+    // beside the head exactly as a Bytes body is; the buffer is a local and is
+    // dropped when this returns, so — unlike the response buffer this work
+    // removed — nothing keeps it between requests. The day write_vectored_text
+    // lands, this body becomes a direct vectored send of the string with no
+    // copy, and that swap is the only change.
+    fn flush_with_text(text: string) -> Result<bool> {
+        let payload: Bytes = new Bytes(0)
+        payload.reserve(text.len())
+        payload.append_string(text)
+        return self.flush_with_body(payload)
     }
 
     fn append_error(status: int,
@@ -343,7 +419,7 @@ unique class ServerConnection {
                                !headers.has("Server") {
                                 headers.add("Server", app.server_header())
                             }
-                            self.append_response(
+                            self.append_response_bytes(
                                 done.status, done.reason, headers, done.body,
                                 keep_alive, head_only, options)?
                             stats.responses += 1
@@ -388,14 +464,12 @@ unique class ServerConnection {
                             self.await_completion(
                                 active, app, options, stats)?
                         } else {
-                            let queued: Result<bool> = self.append_response(
-                                active.response.status,
-                                active.response.reason,
-                                active.response.headers,
-                                active.response.body,
-                                active.request.keep_alive,
-                                active.head_only,
-                                options)
+                            let queued: Result<bool> =
+                                self.append_response_from(
+                                    active.response,
+                                    active.request.keep_alive,
+                                    active.head_only,
+                                    options)
                             let closed: Result<bool> = active.close()
                             queued?
                             closed?
@@ -465,12 +539,9 @@ unique class ServerConnection {
                                 active.response.header(
                                     "Server", app.server_header())
                             }
-                            self.append_response(
-                                active.response.status,
-                                active.response.reason,
-                                active.response.headers,
-                                active.response.body,
-                                false, active.head_only, options)?
+                            self.append_response_from(
+                                active.response, false,
+                                active.head_only, options)?
                             stats.responses += 1
                         }
                     }

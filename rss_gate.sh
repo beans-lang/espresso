@@ -9,13 +9,19 @@
 # It measures the NATIVE binary: under the tree interpreter the process is the
 # whole compiler and its baseline RSS dwarfs the thing under test.
 #
-# It FAILS before the body is borrowed (issue beans-lang/beans#140, item 2):
-# every connection keeps the megabyte its HttpResponse.body grew to
-# (resize(0) frees no pages), so 32 connections retain ~32 MiB — the bulk of
-# the ~38.8 MiB the /static1m ledger reports under wrk -c32. Once the response
-# borrows the handler's payload instead of copying it, this drops well under
-# 12 MiB. After lane A's mmap-backed static body the target tightens to 10 MiB
-# (set RSS_LIMIT_KB=10240).
+# Before the body is borrowed (issue beans-lang/beans#140, item 2) every
+# connection keeps the megabyte its HttpResponse.body grew to (resize(0) frees
+# no pages), so 32 connections retain ~32 MiB — the bulk of the ~38.8 MiB the
+# /static1m ledger reports under wrk -c32; the process peaks near 41 MiB here.
+#
+# Borrowing the string payload removes that per-connection copy and drops the
+# peak to ~24 MiB. The last step to the 12 MiB target is TcpStream
+# .write_vectored_text: until it exists, a large string body is copied once into
+# a fresh per-send buffer to be sent beside its head, and under 32-way
+# concurrency those buffers set the allocator's high-water mark near 32 MiB and
+# it is not returned to the OS. With write_vectored_text the string is sent with
+# no such buffer and the peak falls under 12 MiB; after lane A's mmap-backed
+# static body the target tightens to 10 MiB (set RSS_LIMIT_KB=10240).
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)

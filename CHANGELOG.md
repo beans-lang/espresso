@@ -4,6 +4,22 @@ This file records user-facing changes in each Espresso release.
 
 ## [Unreleased]
 
+### Changed
+
+- **A response holds the handler's payload by reference, not by copy.** A
+  `string` body (`text`, `json_text`, `html`, and the results that build on
+  them) is kept as the handler's own string; a `Bytes` body is moved in. The
+  server frames the head from the payload's length and either appends a small
+  payload to its output queue or sends a large one beside the head with one
+  vectored write — the payload is never staged in a per-connection buffer that
+  grows to its size and keeps that capacity between requests. For 32 connections
+  each holding a 1 MiB response that removes ~32 MiB of resident memory. The
+  bytes on the wire are byte-for-byte unchanged. As a consequence
+  `HttpResponse.body` now holds only a **bytes-form** payload and is empty for a
+  string response; read the payload in either form with the new
+  `HttpResponse.body_bytes()`, and query the form with `is_text_body()`,
+  `text_payload()` and `body_len()`. (beans-lang/beans#140)
+
 ### Added
 
 - **Responses carry a `Date` header** (RFC 9110 §6.6.1). Every response an
