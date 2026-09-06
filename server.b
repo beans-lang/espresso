@@ -12,6 +12,15 @@ import std.time
 // fiber unregisters before it closes, and both run on the worker thread.
 extern "C" fn shutdown(fd: int, how: int) -> i32
 
+// The body size at which a response stops being copied into the output queue
+// and is sent beside its head instead.
+//
+// Below it, copying is cheaper than the write it would save, and appending
+// keeps pipelined responses batched into one send. Above it, the copy is the
+// dominant cost of the response: a megabyte copied twice is more time than
+// everything else the server does for that request put together.
+const vectored_body_min: int = 16384
+
 /// Bounds for the listener, parser, connections, bodies, and output queues.
 pub class ServerOptions {
     pub host: string = "127.0.0.1"
@@ -233,14 +242,58 @@ unique class ServerConnection {
         if !headers.has("Date") {
             headers.add("Date", self.http_date())
         }
-        let start: int = self.output.len()
-        http.encode_response_append(
-            self.output, status, reason, headers, body,
-            keep_alive && !self.close_after_write)?
-        if head_only && body.len() <= self.output.len() - start {
-            self.output.resize(self.output.len() - body.len())
+        let alive: bool = keep_alive && !self.close_after_write
+        // A HEAD response is the head. Framing the whole response and then
+        // cutting the body off the end copied every byte of it first — a
+        // megabyte, on the static route — to reach a buffer it was about to
+        // be removed from.
+        if head_only {
+            http.encode_response_head_append(
+                self.output, status, reason, headers, body.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            return ok(true)
         }
+        // Past this size, copying the body into the output queue costs more
+        // than the extra write that avoids it: a 16 KB copy is around half a
+        // microsecond and a send is one or two, and the gap only widens with
+        // the body. Below it, appending keeps pipelined responses batched
+        // into a single write, which is worth more than the copy costs.
+        if body.len() >= vectored_body_min {
+            let forbidden: bool = http.encode_response_head_append(
+                self.output, status, reason, headers, body.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            if forbidden { return ok(true) }
+            return self.flush_with_body(body)
+        }
+        http.encode_response_append(
+            self.output, status, reason, headers, body, alive)?
         if !keep_alive { self.close_after_write = true }
+        return ok(true)
+    }
+
+    // Sends the queued output and this response's body as one pair, without
+    // the body ever entering the queue.
+    //
+    // Anything already queued is in front of the head this call just framed,
+    // so writing the queue and the body together keeps pipelined responses in
+    // order by construction: the body cannot overtake what was queued before
+    // it, and nothing can be framed behind it until this returns.
+    fn flush_with_body(body: Bytes) -> Result<bool> {
+        var offset: int = 0
+        let total: int = self.output.len() + body.len()
+        for offset < total {
+            match self.stream.write_vectored(self.output, body, offset) {
+                ok(count) => {
+                    if count <= 0 {
+                        return err("the connection accepted no output",
+                                   "reset")
+                    }
+                    offset += count
+                }
+                err(problem) => { return err(problem.msg, problem.kind) }
+            }
+        }
+        self.output.resize(0)
         return ok(true)
     }
 
