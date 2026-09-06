@@ -6,6 +6,13 @@ This file records user-facing changes in each Espresso release.
 
 ### Changed
 
+- **The `Server` header is no longer sent by default.** `AppOptions
+  .server_header` now defaults to `""`, so — like Go's `net/http` and Bun —
+  espresso adds no `Server` header unless asked. The 18 bytes it used to frame
+  on every response were 1–2% of the small routes. Set `server_header` to a
+  non-empty value (`"espresso"` restores the old behaviour) to opt back in. No
+  test golden captured the header, so none changed. (beans-lang/beans#140)
+
 - **A response holds the handler's payload by reference, not by copy.** A
   `string` body (`text`, `json_text`, `html`, and the results that build on
   them) is kept as the handler's own string; a `Bytes` body is moved in. The
