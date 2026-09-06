@@ -210,6 +210,22 @@ pub unique class HttpRequest {
         return ok(true)
     }
 
+    // Releases a body buffer that grew past `threshold`, so a connection that
+    // served one message larger than a single read does not keep that capacity
+    // for the rest of its life — resize(0) between requests frees no pages, so
+    // without this a keep-alive connection holds its largest body forever. A
+    // body at or below the threshold is left alone, so a steady small-request
+    // connection never reallocates; a steady large-request one pays one buffer
+    // per request, which its next reserve (from Content-Length) fills without
+    // regrowing.
+    fn release_large_body(threshold: int) -> bool {
+        if self.body.len() > threshold {
+            self.body = new Bytes(0)
+            return true
+        }
+        return false
+    }
+
     /// True when `path` needs no percent-decoding to compare literally.
     fn plain_path() -> bool { return self.path_plain }
 

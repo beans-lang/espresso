@@ -92,6 +92,13 @@ pub class ServerStats {
     pub responses: int = 0
     pub connection_errors: int = 0
     pub active_peak: int = 0
+    /// How many times a request body that had outgrown one read was released
+    /// after its response, rather than kept for the connection's life.
+    pub request_buffers_released: int = 0
+    /// How many request bodies larger than one read were sized to their
+    /// declared length up front, so their pieces filled one allocation instead
+    /// of regrowing it.
+    pub request_bodies_presized: int = 0
 
     pub fn init() {}
 }
@@ -585,6 +592,23 @@ unique class ServerConnection {
                     some(active) => {
                         match app.begin_request(active, request) {
                             ok(_) => {
+                                // Reserve the body to its declared length so
+                                // the pieces that follow fill one allocation
+                                // instead of regrowing it — a 101 KB body
+                                // arriving through a 64 KB read buffer regrows
+                                // once per request otherwise. Bounded by
+                                // max_body, which the body loop enforces
+                                // anyway, so a lying Content-Length can never
+                                // reserve more than a real body could; a
+                                // chunked or bodyless message declares -1 and
+                                // reserves nothing.
+                                let declared: int = request.content_length
+                                if declared > 0 && declared <= self.max_body {
+                                    active.request.body.reserve(declared)
+                                    if declared > options.read_buffer_bytes {
+                                        stats.request_bodies_presized += 1
+                                    }
+                                }
                                 // begin_request replaced the context's view
                                 // of the previous head, so its shell can go
                                 // back to the parser for the next message.
@@ -637,6 +661,18 @@ unique class ServerConnection {
             done(keep_alive) => {
                 self.have_head = false
                 self.dispatch(app, keep_alive, options, stats)?
+                // The response is sent; a body buffer that outgrew one read is
+                // no longer needed and must not be carried for the life of the
+                // connection.
+                match self.context {
+                    some(active) => {
+                        if active.request.release_large_body(
+                                options.read_buffer_bytes) {
+                            stats.request_buffers_released += 1
+                        }
+                    }
+                    none => {}
+                }
             }
             upgraded(request, remainder) => {
                 self.append_error(

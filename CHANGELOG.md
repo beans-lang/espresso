@@ -6,6 +6,17 @@ This file records user-facing changes in each Espresso release.
 
 ### Changed
 
+- **A request body no longer grows unboundedly with a connection's lifetime.**
+  The request body is sized to its declared `Content-Length` before its pieces
+  arrive, so assembling a body larger than one read fills one allocation instead
+  of regrowing it; and once a body that outgrew a read has been served, its
+  buffer is released rather than kept for the connection's life (`resize(0)`
+  between requests frees no pages). Without this, a keep-alive connection that
+  once received a large body held that capacity — up to `max_body` — forever, so
+  a client could make every connection retain its maximum by sending one large
+  request each. `ServerStats` now reports `request_buffers_released` and
+  `request_bodies_presized`. (beans-lang/beans#140)
+
 - **The `Server` header is no longer sent by default.** `AppOptions
   .server_header` now defaults to `""`, so — like Go's `net/http` and Bun —
   espresso adds no `Server` header unless asked. The 18 bytes it used to frame
