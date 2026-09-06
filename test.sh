@@ -89,6 +89,13 @@ if [[ ${1:-} == "--native" ]]; then
         diff -u "$ROOT/tests/$name.out" "$tmp/$name.native"
     done
     assert_panic_stderr "$tmp/panic.native.err" "native"
+
+    # The resident-memory gate: 32 keep-alive connections each served one 1 MiB
+    # response must hold well under the limit once the response borrows its
+    # payload instead of copying it (beans-lang/beans#140). Native only — under
+    # the interpreter the process is the whole compiler. It measures RSS, not
+    # throughput, so a busy box does not flake it.
+    bash "$ROOT/rss_gate.sh"
 fi
 
 echo "ok espresso: interpreter, target checks${1:+, native}"

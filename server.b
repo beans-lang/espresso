@@ -359,18 +359,31 @@ unique class ServerConnection {
         return ok(true)
     }
 
-    // The string twin of flush_with_body. Until TcpStream.write_vectored_text
-    // exists, the string is copied once into a fresh local buffer and sent
-    // beside the head exactly as a Bytes body is; the buffer is a local and is
-    // dropped when this returns, so — unlike the response buffer this work
-    // removed — nothing keeps it between requests. The day write_vectored_text
-    // lands, this body becomes a direct vectored send of the string with no
-    // copy, and that swap is the only change.
+    // The string twin of flush_with_body: sends the queued output and this
+    // response's string body as one pair, without the string ever entering a
+    // buffer. write_vectored_text takes the string's bytes directly, so a large
+    // text body is neither copied into a response buffer nor staged in a
+    // per-send one — the copy the old path made, and the allocator high-water
+    // 32 of those concurrent copies set, are both gone. The ordering guarantee
+    // is flush_with_body's: the queued output goes in front of the body in the
+    // same write, so pipelined responses keep their order by construction.
     fn flush_with_text(text: string) -> Result<bool> {
-        let payload: Bytes = new Bytes(0)
-        payload.reserve(text.len())
-        payload.append_string(text)
-        return self.flush_with_body(payload)
+        var offset: int = 0
+        let total: int = self.output.len() + text.len()
+        for offset < total {
+            match self.stream.write_vectored_text(self.output, text, offset) {
+                ok(count) => {
+                    if count <= 0 {
+                        return err("the connection accepted no output",
+                                   "reset")
+                    }
+                    offset += count
+                }
+                err(problem) => { return err(problem.msg, problem.kind) }
+            }
+        }
+        self.output.resize(0)
+        return ok(true)
     }
 
     fn append_error(status: int,
