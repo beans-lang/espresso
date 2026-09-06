@@ -196,12 +196,17 @@ espresso.add_views(builder, views)?
 ## The server
 
 `espresso.WebServer.bind(app, options)` serves plain HTTP/1.1 with
-keep-alive and pipelining; `serve_workers` scales over cores with
-SO_REUSEPORT. `context.respond_later()` hands a move-only `Responder`
-to any thread for deferred responses — return `espresso.detached()`
-from the handler. `espresso.TestHost` runs the full pipeline in memory
-for tests, and `espresso.map_openapi(app)` serves the route table as
-OpenAPI 3.1.
+keep-alive and pipelining; `serve_workers` scales over cores by
+accepting on one listener and dealing each connection to a worker.
+It does not use SO_REUSEPORT, and on macOS that is why it works:
+Darwin's SO_REUSEPORT does not balance — the last socket to bind
+receives every connection — so a shared-port design there runs on
+one core no matter how many workers it starts.
+
+`context.respond_later()` hands a move-only `Responder` to any thread
+for deferred responses — return `espresso.detached()` from the handler.
+`espresso.TestHost` runs the full pipeline in memory for tests, and
+`espresso.map_openapi(app)` serves the route table as OpenAPI 3.1.
 
 Every response carries a `Date` header (RFC 9110 IMF-fixdate, GMT),
 formatted once per wall-clock second and reused; a handler that sets its
