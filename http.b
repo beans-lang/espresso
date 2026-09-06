@@ -292,6 +292,12 @@ pub unique class HttpResponse {
     body_text: string = ""
     // Which form carries the payload this response.
     body_is_text: bool = false
+    // The body's content type, kept for the head cache's key so it need not be
+    // scanned out of the header block each response.
+    content_type_value: string = ""
+    // True once a handler adds a header of its own through header(); such a
+    // response has non-standard headers and is never framed from a cached head.
+    has_custom: bool = false
     pub completed: bool = false
 
     pub fn init() {}
@@ -309,11 +315,14 @@ pub unique class HttpResponse {
         self.body_text = ""
         if self.body.len() != 0 { self.body = new Bytes(0) }
         self.body_is_text = false
+        self.content_type_value = ""
+        self.has_custom = false
         self.completed = false
     }
 
     pub fn header(name: string, value: string) {
         self.headers.add(name, value)
+        self.has_custom = true
     }
 
     /// Finishes the response with a `Bytes` body, moved in without a copy.
@@ -325,6 +334,7 @@ pub unique class HttpResponse {
         self.body = move body
         self.body_text = ""
         self.body_is_text = false
+        self.content_type_value = content_type
         if content_type != "" && !self.headers.has("Content-Type") {
             self.headers.add("Content-Type", content_type)
         }
@@ -341,6 +351,7 @@ pub unique class HttpResponse {
         self.body_text = body
         self.body_is_text = true
         if self.body.len() != 0 { self.body = new Bytes(0) }
+        self.content_type_value = content_type
         if content_type != "" && !self.headers.has("Content-Type") {
             self.headers.add("Content-Type", content_type)
         }
@@ -362,6 +373,13 @@ pub unique class HttpResponse {
 
     /// True when the payload is a string (`body` is then empty).
     pub fn is_text_body() -> bool { return self.body_is_text }
+
+    /// The body's content type, as set by `text`/`bytes`/the results.
+    pub fn content_type() -> string { return self.content_type_value }
+
+    /// True when a handler added a header of its own; the head cache is bypassed
+    /// for such a response.
+    pub fn has_custom_header() -> bool { return self.has_custom }
 
     /// The string-form payload, or "" for a bytes body. A cheap reference.
     pub fn text_payload() -> string { return self.body_text }

@@ -6,6 +6,17 @@ This file records user-facing changes in each Espresso release.
 
 ### Changed
 
+- **A connection caches its response head instead of rebuilding it each
+  request.** A connection answering the same shape repeatedly (a hot route, a
+  benchmark) now frames the head by reusing a cached copy — keyed by (status,
+  reason, content-type, keep-alive) — writing only the Content-Length digits and
+  patching the Date in place, rather than re-validating the headers and building
+  the head line by line. The cached bytes are std.http's own (the entry is built
+  by calling `encode_response_head_append`), so the wire output is byte-for-byte
+  unchanged; a response with a custom header, no content type, a HEAD, or a
+  body-forbidden status takes the original path. On /json this is ~0.6 µs less
+  user time per request (~19%). (beans-lang/beans#140)
+
 - **A request body no longer grows unboundedly with a connection's lifetime.**
   The request body is sized to its declared `Content-Length` before its pieces
   arrive, so assembling a body larger than one read fills one allocation instead

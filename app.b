@@ -170,7 +170,10 @@ pub class WebApplication {
         }
         if self.options.server_header != "" &&
            !context.response.headers.has("Server") {
-            context.response.header("Server", self.options.server_header)
+            // A framework header, not a handler's: add it straight so it does
+            // not mark the response as carrying a custom header (the head cache
+            // includes Server and stays usable when it is opted in).
+            context.response.headers.add("Server", self.options.server_header)
         }
         return ok(true)
     }

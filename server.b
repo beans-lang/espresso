@@ -103,6 +103,137 @@ pub class ServerStats {
     pub fn init() {}
 }
 
+// A byte-substring search: the index in `haystack` where `needle` begins at or
+// after `start`, or -1. Used only when a head-cache entry is built, to locate
+// the two spans that vary between responses.
+fn find_bytes(haystack: Bytes, needle: string, start: int) -> int {
+    let n: int = haystack.len()
+    let m: int = needle.len()
+    if m == 0 { return start }
+    var i: int = if start < 0 { 0 } else { start }
+    for i + m <= n {
+        var j: int = 0
+        var matched: bool = true
+        for j < m {
+            if haystack.get(i + j) != needle.byte_at(j) {
+                matched = false
+                break
+            }
+            j += 1
+        }
+        if matched { return i }
+        i += 1
+    }
+    return -1
+}
+
+// A per-connection cache of one response head, so a connection answering the
+// same shape repeatedly frames the head by copying two spans and patching the
+// Date, instead of re-validating the headers and rebuilding the head line by
+// line each response.
+//
+// The cached bytes are std.http's own: the entry is built by calling
+// http.encode_response_head_append with a body length of 0, so the head is
+// byte-for-byte what the plain path produces. Only two spans vary between
+// responses of one shape — the Content-Length digits and the 29-byte
+// IMF-fixdate Date value — and both are located once, at build time, by
+// searching the produced bytes. If std.http ever changes its head layout, the
+// entry is rebuilt from std.http and the bytes stay identical by construction;
+// only the two build-time searches would need to still find their substrings,
+// and a miss there simply declines the cache and the plain path frames the
+// response.
+pub class ResponseHeadCache {
+    valid: bool = false
+    key_status: int = 0
+    key_reason: string = ""
+    key_ctype: string = ""
+    key_alive: bool = false
+    // "HTTP/1.1 <status> <reason>\r\nContent-Length: "
+    prefix: Bytes = new Bytes(0)
+    // "\r\n<Connection?><Content-Type><Server?>Date: <29 bytes>\r\n\r\n"
+    suffix: Bytes = new Bytes(0)
+    // Offset of the 29-byte Date value within `suffix`.
+    date_off: int = -1
+    // The wall-second the cached Date bytes are for.
+    stamped_second: int = -1
+
+    pub fn init() {}
+
+    // Appends the framed head for this response to `out`, reusing the cached
+    // entry when the shape matches and rebuilding it when it does not. Returns
+    // false (appending nothing) when the response cannot be cached, so the
+    // caller frames it the plain way. `headers` must be the response's standard
+    // headers (Content-Type, and Server if opted in) with no custom header and
+    // no Date; `date_text` is the current IMF-fixdate and `second` its wall
+    // second.
+    pub fn frame_into(out: Bytes,
+                      status: int, reason: string, content_type: string,
+                      headers: http.Headers, keep_alive: bool, body_len: int,
+                      date_text: string, second: int) -> Result<bool> {
+        if !self.valid || self.key_status != status ||
+           self.key_alive != keep_alive || self.key_ctype != content_type ||
+           self.key_reason != reason {
+            let built: bool = self.build(
+                status, reason, content_type, headers, keep_alive, date_text)?
+            if !built { return ok(false) }
+            self.stamped_second = second
+        }
+        if second != self.stamped_second {
+            self.suffix.copy_from(Bytes.from(date_text), self.date_off)
+            self.stamped_second = second
+        }
+        out.append(self.prefix)
+        out.append_int_text(body_len)
+        out.append(self.suffix)
+        return ok(true)
+    }
+
+    fn build(status: int, reason: string, content_type: string,
+             headers: http.Headers, keep_alive: bool,
+             date_text: string) -> Result<bool> {
+        // Only Content-Type and an optional Server may stand before the Date
+        // this adds; anything else means a non-standard header slipped past the
+        // response's custom flag, so decline rather than cache a wrong head.
+        if headers.count() == 0 || headers.count() > 2 { return ok(false) }
+        if headers.name_at(0) != "Content-Type" { return ok(false) }
+        let temp: http.Headers = new http.Headers()
+        for index: int in 0..headers.count() {
+            temp.add(headers.name_at(index), headers.value_at(index))
+        }
+        temp.add("Date", date_text)
+        let buf: Bytes = new Bytes(0)
+        let forbidden: bool = http.encode_response_head_append(
+            buf, status, reason, temp, 0, keep_alive)?
+        // A body-forbidden status has no Content-Length line to splice.
+        if forbidden { return ok(false) }
+        let cl_at: int = find_bytes(buf, "Content-Length: ", 0)
+        if cl_at < 0 { return ok(false) }
+        // The placeholder length is exactly "0"; a real response's digits are
+        // written in its place and the suffix follows it.
+        let digits_at: int = cl_at + 16
+        if digits_at >= buf.len() || buf.get(digits_at) != 48 { return ok(false) }
+        let suffix_at: int = digits_at + 1
+        let date_label_at: int = find_bytes(buf, "Date: ", suffix_at)
+        if date_label_at < 0 { return ok(false) }
+        let date_val_at: int = date_label_at + 6
+        // A fixed-width IMF-fixdate is 29 bytes and ends in CRLF; patching in
+        // place is only safe if that is exactly what was produced.
+        if date_val_at + 31 > buf.len() { return ok(false) }
+        if buf.get(date_val_at + 29) != 13 || buf.get(date_val_at + 30) != 10 {
+            return ok(false)
+        }
+        self.prefix = buf.slice(0, digits_at)
+        self.suffix = buf.slice(suffix_at, buf.len())
+        self.date_off = date_val_at - suffix_at
+        self.valid = true
+        self.key_status = status
+        self.key_reason = reason
+        self.key_ctype = content_type
+        self.key_alive = keep_alive
+        return ok(true)
+    }
+}
+
 // Live connection descriptors, for the graceful sweep only. Every touch
 // happens on the owning worker thread — the accept fiber adds, each
 // connection fiber removes itself before closing, the sweep iterates —
@@ -186,6 +317,9 @@ unique class ServerConnection {
     // no lock and never crosses a thread.
     date_text: string = ""
     date_second: int = -1
+    // Caches this connection's last response head so a repeated shape is framed
+    // by copying two spans and patching the Date — see ResponseHeadCache.
+    head_cache: ResponseHeadCache = new ResponseHeadCache()
 
     fn init(move stream: net.TcpStream,
             peer: net.Address,
@@ -240,6 +374,42 @@ unique class ServerConnection {
                             keep_alive: bool,
                             head_only: bool,
                             options: ServerOptions) -> Result<bool> {
+        // Fast path: a response with only standard headers and a known content
+        // type reuses this connection's cached head, framed by copying two
+        // spans and patching the Date rather than re-validating the headers and
+        // rebuilding the head. HEAD, custom-header, no-content-type, and
+        // over-limit responses fall through to the plain path unchanged.
+        if !head_only && !response.has_custom_header() &&
+           response.content_type() != "" &&
+           response.body_len() <= options.max_response_body_bytes {
+            let alive: bool = keep_alive && !self.close_after_write
+            let body_len: int = response.body_len()
+            let date: string = self.http_date()
+            match self.head_cache.frame_into(
+                    self.output, response.status, response.reason,
+                    response.content_type(), response.headers, alive, body_len,
+                    date, self.date_second) {
+                ok(cached) => {
+                    if cached {
+                        if !keep_alive { self.close_after_write = true }
+                        if response.is_text_body() {
+                            if body_len >= vectored_body_min {
+                                return self.flush_with_text(
+                                    response.text_payload())
+                            }
+                            self.output.append_string(response.text_payload())
+                            return ok(true)
+                        }
+                        if body_len >= vectored_body_min {
+                            return self.flush_with_body(response.body)
+                        }
+                        self.output.append(response.body)
+                        return ok(true)
+                    }
+                }
+                err(problem) => { return err(problem.msg, problem.kind) }
+            }
+        }
         if response.is_text_body() {
             return self.append_response_text(
                 response.status, response.reason, response.headers,
