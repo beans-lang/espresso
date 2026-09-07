@@ -319,7 +319,6 @@ pub class Chat implements espresso.UpgradeHandler {
                    request: http.Request,
                    move stream: net.TcpStream) -> Result<bool> {
         let room: string = context.request.route("room").or("")
-        stream.set_nonblocking(false)?
         let socket: websocket.Connection =
             websocket.Connection.accept(move stream, request)?
         return socket.send_text("welcome to {room}")
@@ -343,11 +342,11 @@ app.map_upgrade(r"/ws/{room}", new Chat())?
 - **`request` is the raw parsed head**, which is what `accept_websocket` needs:
   the handshake fields, the HTTP version and the method live there and not on
   `HttpContext.request`.
-- **The socket arrives non-blocking and registered with the fiber netpoller.**
-  `read_into`/`read_into_waiting` park the fiber and leave the worker thread
-  free; a library whose reads go through `TcpStream.read` does not park, so a
-  handler using one calls `set_nonblocking(false)` first and then holds that
-  worker thread for the life of the connection.
+- **Reads on the handed-over socket park the fiber**, they do not hold the
+  worker thread, so many long-lived sockets share one worker: a handler
+  waiting 900 ms for its next frame is overtaken by one that arrives later and
+  waits less. `std.websocket` works over it directly, with no mode to change
+  first.
 - **Bytes that arrive after the handshake in the same read are a 400.** They
   belong to the next protocol, this server has already consumed them, and a
   `TcpStream` cannot carry them across the hand-off — so the handshake is

@@ -9,6 +9,7 @@ import std.http
 import std.io
 import std.net
 import std.thread
+import std.time
 import std.websocket
 
 // ---- the server side ---------------------------------------------------------
@@ -27,13 +28,6 @@ pub class EchoSocket implements espresso.UpgradeHandler {
                    move stream: net.TcpStream) -> Result<bool> {
         let room: string = context.request.route("room").or("-")
         let session: string = context.request.cookie("sid").or("-")
-        // std.websocket reads through `TcpStream.read`, which does not park on
-        // a fiber, and espresso hands the socket over exactly as the
-        // connection loop left it: non-blocking and registered with the fiber
-        // netpoller. Restoring blocking mode is what makes those reads work,
-        // and it costs this worker thread for as long as the socket lives —
-        // see the note on espresso.UpgradeHandler.
-        stream.set_nonblocking(false)?
         let socket: websocket.Connection =
             websocket.Connection.accept(move stream, request)?
         socket.send_text("hello {self.label} room={room} sid={session}")?
@@ -72,7 +66,6 @@ pub class PanicSocket implements espresso.UpgradeHandler {
     pub fn upgrade(context: espresso.HttpContext,
                    request: http.Request,
                    move stream: net.TcpStream) -> Result<bool> {
-        stream.set_nonblocking(false)?
         let socket: websocket.Connection =
             websocket.Connection.accept(move stream, request)?
         socket.send_text("about to fail")?
@@ -80,11 +73,9 @@ pub class PanicSocket implements espresso.UpgradeHandler {
     }
 }
 
-// A protocol that is not WebSocket, driven the way a fiber wants: the socket
-// stays non-blocking and every read parks in the netpoller instead of holding
-// the worker thread. It exists to prove two things at once — that the
-// hand-off carries no assumption about which protocol comes next, and that a
-// handler which parks is served correctly by the socket it is given.
+// A protocol that is not WebSocket. It exists to prove that the hand-off
+// carries no assumption about which protocol comes next: the handler writes
+// its own 101 and speaks lines.
 pub class LineSocket implements espresso.UpgradeHandler {
     pub fn init() {}
 
@@ -102,8 +93,6 @@ pub class LineSocket implements espresso.UpgradeHandler {
         var rounds: int = 0
         for rounds < 8 {
             rounds += 1
-            // read_into parks this fiber in the netpoller; the worker thread
-            // stays free for every other connection on it.
             let count: int = stream.read_into(buffer)?
             if count == 0 { break }
             let piece: string = buffer.slice(0, count).to_string()
@@ -124,6 +113,31 @@ pub class DroppingSocket implements espresso.UpgradeHandler {
                    request: http.Request,
                    move stream: net.TcpStream) -> Result<bool> {
         return ok(true)
+    }
+}
+
+// Two connections through this handler prove the load-bearing property: a
+// read on a handed-over socket parks the fiber instead of holding the worker
+// thread, so a slow socket does not stall the fast one beside it.
+//
+// `order` is written from the connection fibers, which all run on the one
+// worker thread that `run()` drives, so it needs no lock — and it is what
+// main prints. If reads held the thread, the first connection's 900ms wait
+// would delay the accept of the second and the order would come out A then B.
+pub class ParkProbe implements espresso.UpgradeHandler {
+    pub order: List<string> = []
+
+    pub fn init() {}
+
+    pub fn upgrade(context: espresso.HttpContext,
+                   request: http.Request,
+                   move stream: net.TcpStream) -> Result<bool> {
+        let who: string = context.request.route("who").or("-")
+        stream.write_text(
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: park\r\nConnection: Upgrade\r\n\r\n")?
+        let arrived: Bytes = stream.read(4096).or(new Bytes(0))
+        self.order.push("{who}:{arrived.len()}")
+        return stream.close()
     }
 }
 
@@ -386,6 +400,24 @@ fn line_case(port: int) -> string {
     }
 }
 
+// One park-probe connection: upgrade, wait `speak_after` ms, then speak.
+fn park_talk(port: int, who: string, delay: int, speak_after: int) -> string {
+    time.sleep_millis(delay)
+    match dial(port) {
+        err(problem) => { return "{who} connect {problem.kind}" }
+        ok(peer) => {
+            let sent: bool = peer.send(
+                "GET /park/{who} HTTP/1.1\r\nHost: h\r\nUpgrade: park\r\nConnection: Upgrade\r\n\r\n")
+            let head: string = status_line(peer.head())
+            time.sleep_millis(speak_after)
+            let spoke: bool = peer.send("HI")
+            let tail: string = peer.rest()
+            let closed: bool = peer.close()
+            return "{who} {head}"
+        }
+    }
+}
+
 // ---- the scenarios ------------------------------------------------------------
 
 fn client(port: int, control: espresso.ServerControl) -> string {
@@ -471,6 +503,19 @@ fn client(port: int, control: espresso.ServerControl) -> string {
     // 10. The ordinary route at the upgrade path is still an ordinary route.
     lines.push("plain-get {raw_case(port, "GET /ws/lobby HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n", false)}")
 
+    // 11. Two upgraded connections at once. The first waits 900ms for its
+    //     first message, the second arrives 200ms later and waits 100ms. If a
+    //     read on a handed-over socket parks the fiber, the second finishes
+    //     first; if it held the worker thread, the second would not even be
+    //     accepted until the first was done.
+    let slow: Thread<string> = thread.spawn(fn() -> string {
+        return park_talk(port, "A", 0, 900)
+    })
+    let quick: Thread<string> = thread.spawn(fn() -> string {
+        return park_talk(port, "B", 200, 100)
+    })
+    lines.push("concurrent {slow.join()} | {quick.join()}")
+
     let stopped: bool = control.stop().or(false)
     return lines.join("\n")
 }
@@ -489,6 +534,8 @@ fn main() {
     app.map_upgrade("/ws/boom", new PanicSocket()).expect("boom")
     app.map_upgrade("/ws/drop", new DroppingSocket()).expect("drop")
     app.map_upgrade("/ws/deferred", new EchoSocket("deferred")).expect("deferred")
+    let park: ParkProbe = new ParkProbe()
+    app.map_upgrade(r"/park/{who}", park).expect("park")
 
     // Registration refuses the same shape twice, the way routes do.
     match app.map_upgrade(r"/ws/{other}", new EchoSocket("second")) {
@@ -512,5 +559,6 @@ fn main() {
     })
     let stats: espresso.ServerStats = server.run().expect("run")
     io.println(visitor.join())
+    io.println("park order {park.order.join(" then ")}")
     io.println("accepted {stats.accepted} requests {stats.requests} responses {stats.responses} upgrades {stats.upgrades}")
 }

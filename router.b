@@ -132,17 +132,14 @@ class Route {
 /// Returning an error ends the connection and is recorded server-side; there
 /// is no way to answer with a status, because the socket is gone.
 ///
-/// **The socket arrives exactly as the connection loop left it: non-blocking,
-/// and registered with this worker's fiber netpoller.** That is the useful
-/// state — `TcpStream.read_into` and `read_into_waiting` park the fiber and
-/// leave the worker thread free for every other connection on it, which is
-/// what a server holding many long-lived sockets wants. A library whose reads
-/// go through `TcpStream.read` does not park (`std.websocket` is one), and
-/// with a non-blocking socket those reads answer "would block" instead of
-/// waiting. Such a handler must call `stream.set_nonblocking(false)` before it
-/// hands the socket to the library, and it then holds the worker thread for as
-/// long as the connection lives — so it belongs on a thread of its own, not on
-/// a worker shared with ordinary requests.
+/// **The socket arrives registered with this worker's fiber netpoller, and
+/// every read on it parks the fiber rather than holding the thread.** That
+/// holds for `read`, `read_exact` and `read_into` alike, so a handler that
+/// waits — for the next WebSocket frame, for the next line — costs one parked
+/// fiber and leaves the worker free for every other connection on it. Two
+/// upgraded connections on one worker are served concurrently, which
+/// tests/upgrade.b measures rather than assumes: a handler that waits 900ms is
+/// overtaken by one that arrives 200ms later and waits 100ms.
 ///
 /// The handler runs on a child fiber, so a panic inside it is contained: it
 /// ends this one connection, is recorded server-side, and the server keeps
