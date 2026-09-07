@@ -1,10 +1,24 @@
 #!/usr/bin/env bash
 # Resident-memory gate for the borrowed-body work.
 #
-# tests/rss.b holds 32 keep-alive connections open, each served one 1 MiB
+#   rss_gate.sh [case] [limit_kb]      default: rss 12288
+#
+# tests/<case>.b holds 32 keep-alive connections open, each served one 1 MiB
 # response, then parks. This driver waits for its "ready" marker, samples the
 # process's peak RSS while all 32 are live, checks it against a threshold, then
 # lets the program go.
+#
+# Two cases use it, one per payload form, because the two forms cost memory for
+# different reasons and a gate on one says nothing about the other:
+#
+#   rss         the string path. One shared 1 MiB string answers all 32
+#               requests, so a correct server holds ONE megabyte and the peak
+#               is single digits; the copies it used to make were per
+#               connection.  Limit 12 MiB.
+#   rss_bytes   the bytes path. Each request is answered from its own prepared
+#               BytesResult, so a correct server holds 32 megabytes once — and
+#               a server that copies the payload out of the result holds them
+#               twice.  Limit 48 MiB, with the two outcomes ~40 MiB apart.
 #
 # It measures the NATIVE binary: under the tree interpreter the process is the
 # whole compiler and its baseline RSS dwarfs the thing under test.
@@ -26,9 +40,23 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")" && pwd)
 
-# The ceiling, in KB. 12 MiB is the borrowed-body target; the pre-fix baseline
-# is ~40 MiB, and the post-mmap target is 10240.
-RSS_LIMIT_KB=${RSS_LIMIT_KB:-12288}
+CASE=${1:-rss}
+
+# The ceiling, in KB, defaulted per case and overridable from the environment
+# per case (RSS_LIMIT_KB, RSS_BYTES_LIMIT_KB) or by a second argument. Each
+# default is a number with two measured outcomes on either side of it, not a
+# round number picked to pass.
+case "$CASE" in
+    # The borrowed-body target. The pre-fix baseline was ~40 MiB and the
+    # post-mmap target is 10240.
+    rss)       CASE_LIMIT_KB=${RSS_LIMIT_KB:-12288} ;;
+    # 32 payloads held once is ~38 MiB; held twice, because the response was
+    # copied out of the result, is ~70 MiB. 48 MiB sits between them with room
+    # for the process's own few MiB either way.
+    rss_bytes) CASE_LIMIT_KB=${RSS_BYTES_LIMIT_KB:-49152} ;;
+    *)         CASE_LIMIT_KB=${RSS_LIMIT_KB:-12288} ;;
+esac
+RSS_LIMIT_KB=${2:-$CASE_LIMIT_KB}
 
 # Resolve the compiler the way test.sh does.
 if [[ -z ${BEANS_ROOT:-} && -x "$ROOT/../../beans/build/beansc" ]]; then
@@ -65,12 +93,12 @@ if [[ -n ${BEANS_ROOT:-} && "$BEANSC" == "$BEANS_ROOT/build/beansc" ]]; then
     cd "$BEANS_ROOT"
 fi
 
-"$BEANSC" build "$ROOT/tests/rss.b" -o "$tmp/rss" >/dev/null
+"$BEANSC" build "$ROOT/tests/$CASE.b" -o "$tmp/$CASE" >/dev/null
 
 # Hold the fifo's write end open on fd 9 so the program's stdin does not see EOF
 # before we answer it.
 exec 9<>"$fifo"
-"$tmp/rss" <"$fifo" >"$tmp/out" 2>"$tmp/err" &
+"$tmp/$CASE" <"$fifo" >"$tmp/out" 2>"$tmp/err" &
 pid=$!
 
 # Wait for the "ready" marker (stderr, unbuffered) — printed only once all 32
@@ -82,13 +110,13 @@ for _ in $(seq 1 400); do
     sleep 0.1
 done
 if [[ -z "$ready" ]]; then
-    echo "rss gate: the server never signalled ready" >&2
+    echo "rss gate ($CASE): the server never signalled ready" >&2
     cat "$tmp/err" >&2
     exit 1
 fi
 readline=$(grep '^ready' "$tmp/err" | head -1)
 if ! echo "$readline" | grep -q 'arrived 32 failed 0'; then
-    echo "rss gate: the 32 connections did not all arrive cleanly: $readline" >&2
+    echo "rss gate ($CASE): the 32 connections did not all arrive cleanly: $readline" >&2
     exit 1
 fi
 
@@ -105,10 +133,10 @@ echo go >&9
 wait "$pid" 2>/dev/null || true
 pid=""
 
-echo "rss gate: peak resident ${peak} KB (~$((peak/1024)) MiB), limit ${RSS_LIMIT_KB} KB (~$((RSS_LIMIT_KB/1024)) MiB)"
+echo "rss gate ($CASE): peak resident ${peak} KB (~$((peak/1024)) MiB), limit ${RSS_LIMIT_KB} KB (~$((RSS_LIMIT_KB/1024)) MiB)"
 if [[ "$peak" -le "$RSS_LIMIT_KB" ]]; then
-    echo "rss gate: PASS"
+    echo "rss gate ($CASE): PASS"
 else
-    echo "rss gate: FAIL — 32 held 1 MiB responses retain too much resident memory" >&2
+    echo "rss gate ($CASE): FAIL — 32 held 1 MiB responses retain too much resident memory" >&2
     exit 1
 fi
