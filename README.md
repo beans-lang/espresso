@@ -13,7 +13,7 @@ import espresso
 pub class HelloController extends espresso.Controller {
     pub fn init() {}
 
-    @espresso.get(route: "/\{name\}")
+    @espresso.get(route: r"/{name}")
     pub fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text("Hello, {name}!")
@@ -74,7 +74,7 @@ Action parameters bind by annotation, compiled once at map time into
 typed extractors — a request runs no reflection lookups.
 
 ```beans
-@espresso.post(route: "/\{id\}/notes")
+@espresso.post(route: r"/{id}/notes")
 pub fn annotate(@espresso.route id: int,
                 @espresso.query(default: "plain") style: string,
                 @espresso.header user_agent: string,
@@ -95,6 +95,11 @@ pub fn annotate(@espresso.route id: int,
   through its type's initializer, fields matched by name, nested
   objects and scalar lists included. Malformed bodies answer 400 with
   a problem+json explanation, never a 500.
+- `@espresso.form` reads a field from an
+  `application/x-www-form-urlencoded` body, with the same `default:` and
+  `required: false` as `@query` — it is the query-string grammar read from
+  the body, through the same parser. A body of another media type answers
+  415, not an empty field set.
 - `@espresso.inject` resolves the parameter from the request's service
   scope.
 - A parameter typed `espresso.HttpContext` binds with no annotation.
@@ -163,6 +168,24 @@ Scope discipline is validated: resolving a scoped service from the root
 provider, capturing a scoped service inside a singleton, and dependency
 cycles are all errors, not surprises.
 
+`provider.activate(type)` constructs a type that is **not** registered,
+resolving each of its constructor parameters from that provider. It is
+the mounting primitive a framework built on espresso needs — a page
+component or a handler object gets constructor injection without every
+one of them having to become a service first. The result is boxed;
+downcast it with `as?`.
+
+```beans
+let mounted: reflect.Value = scope.activate(type_of(Dashboard))?
+match mounted as? Dashboard {
+    some(page) => { io.println(page.title()) }
+    none => {}
+}
+```
+
+Every constructor parameter must be borrowed and the initializer must be
+public; both are reported by `activate` itself, naming the parameter.
+
 ## Middleware
 
 A middleware is a function or an object; both share one pipeline in
@@ -177,6 +200,111 @@ app.use_middleware(new espresso.RequestLog(logger))?
 `handle(context, next) -> Result<bool>`. The built-ins cover CORS
 (`espresso.cors`), security headers, API keys (`espresso.api_key`) and
 a whole-app rate limit (`espresso.fixed_window_rate_limit`).
+
+`espresso.security_headers` is **for a JSON API, not for a page**. Its
+`Content-Security-Policy` is `default-src 'none'; frame-ancestors 'none'`,
+which is exactly right for a response nothing loads subresources from,
+and wrong for anything that serves HTML: it blocks every script file,
+stylesheet, image and WebSocket the page would open, and a browser
+reports that as a blank page with console errors rather than as a failed
+request. An application that serves pages ships its own header layer with
+the `script-src`/`connect-src` its pages actually need; espresso will not
+quietly loosen this one.
+
+`espresso.constant_time_equal(left, right)` compares two strings without
+stopping at the first difference — the comparison a session token, an
+antiforgery token or an API key needs, since `==` leaks the length of the
+shared prefix through timing. `espresso.api_key` uses it; so should
+anything else in your application that compares a secret.
+
+## Forms
+
+`context.request.form()` parses an `application/x-www-form-urlencoded` body
+into the same `QueryValues` a query string parses into, once per request. It
+is the same grammar and the same parser: `+` is a space, `%xx` decodes,
+repeated names stay repeated, and `a&b=2` gives `a` an empty value.
+
+Two things differ from a query string, because a body is not a URL. A control
+byte is data here, so a `<textarea>`'s `%0D%0A` decodes to a newline instead
+of being refused; NUL stays refused in both. And a request whose Content-Type
+is not that media type is an error of kind `unsupported_media_type`, which
+answers **415** — a handler that asked for form fields and got JSON was sent
+the wrong thing, and answering with an empty field set would turn that into a
+silent wrong answer.
+
+## Multipart bodies
+
+`espresso.read_multipart(request, limits)` reads a `multipart/form-data` body
+into its scalar fields and its files.
+
+```beans
+let limits: espresso.MultipartLimits = new espresso.MultipartLimits()
+limits.allowed_file_types = ["image/png", "image/jpeg"]
+let form: espresso.MultipartForm =
+    espresso.read_multipart(context.request, limits)?
+match form.file("avatar") {
+    some(picture) => { io.println("{picture.size} bytes") }
+    none => {}
+}
+```
+
+- **The parser is push-based.** `espresso.MultipartParser` takes bytes in any
+  pieces and hands back `PartEvent`s — a head, body pieces, a done, and one
+  `finished`. However the same bytes are cut up, the same parts come out; the
+  suite feeds eleven bodies through every two-way split, one byte at a time,
+  and ten fixed chunk sizes, and requires an identical result each time. It
+  holds at most one delimiter's worth of undecided bytes, so the memory it
+  needs does not grow with the body.
+- **Where a part's bytes go is yours to choose.** `PartStore.open` is called
+  once per part with the part's head and the storage id espresso generated for
+  it, and answers with a `PartSink`. The default keeps parts in memory;
+  a store that writes to disk, hashes, or forwards elsewhere is that one
+  interface. A sink that was opened is always closed — `finish` on success,
+  `discard` on any failure after it.
+- **The submitted filename is metadata, never a path.** Stored bytes are named
+  by `storage_id`, 32 hex characters from `std.random`. There is deliberately
+  no helper that turns a submitted name into a path, because that helper is
+  the bug.
+- **The client's `Content-Type` is never trusted.** `allowed_file_types` can
+  refuse a file part early, but it never authorizes one: nothing decides what a
+  file is from what the client called it.
+- **Limits are the design.** Parts, per-part bytes, total bytes, filename
+  length, field-name length, header-block size, header count. Each one that is
+  crossed comes back naming what was crossed — 413 for a size, 415 for a
+  refused type, 400 for a malformed body.
+
+## Cookies
+
+`context.request.cookie(name)` reads one cookie; `request.cookies()` is the
+whole jar in arrival order, parsed once per request. Values are the bytes
+that arrived — a cookie is opaque to RFC 6265, so espresso decodes nothing.
+
+```beans
+match context.request.cookie("sid") {
+    some(token) => { io.println(token) }
+    none => {}
+}
+
+let options: espresso.CookieOptions = new espresso.CookieOptions()
+options.max_age_seconds = 3600
+context.response.set_cookie("sid", token, options)?
+```
+
+`CookieOptions` defaults to the safe set: `Path=/`, `HttpOnly`, `Secure`,
+`SameSite=Lax`, and no `Max-Age` (a session cookie). `max_age_seconds = 0`
+deletes; a negative value omits the attribute. `secure` defaults to **true**,
+so a plain-http development server has to turn it off on purpose — Safari
+drops a `Secure` cookie from `http://localhost`, and a cookie the browser
+drops is a login that silently never happens.
+
+`set_cookie` refuses rather than serializes. A name that is not a token, a
+value outside RFC 6265's `cookie-octet`, a `Path` or `Domain` carrying a
+semicolon, comma, CR or LF, or `SameSite=None` without `Secure` all come back
+as an error naming the cookie — before anything is written, so a value taken
+from user input can never forge an attribute or splice a second header into
+the response. Because nothing is encoded on the way out and nothing is decoded
+on the way in, a value that `set_cookie` accepts comes back from `cookie()`
+byte for byte.
 
 ## Logging
 
@@ -237,6 +365,113 @@ still holds and the server keeps serving, but a contained panic abandons
 its frame and leaks what the request held, so a Windows deployment should
 treat a panicking handler as a resource leak until a COFF unwind lands in
 the compiler.
+
+## Streamed responses
+
+The buffered path is the default: a handler returns an `ActionResult`, the
+router executes it, and the server frames one response. `context.begin_stream`
+is the second mode, for a body whose length is not known when the head has to
+go out.
+
+```beans
+fn report(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    let out: espresso.ResponseStream =
+        context.begin_stream(200, "text/html; charset=utf-8")?
+    for row: Row in rows {
+        out.write_text(render(row))?
+    }
+    out.finish()?
+    return espresso.detached()
+}
+```
+
+- The head goes out at `begin_stream`, carrying `Transfer-Encoding: chunked`,
+  the request's `Date`, the application's `Server` header, the content type,
+  and every header the handler added through `context.response.header(...)`
+  **before** the call. Headers added afterwards go nowhere.
+- **The payload is never copied.** A chunk is one vectored write of its size
+  line and the caller's own bytes; the CRLF that closes a chunk rides the
+  front of the next chunk's size line, so a chunk of any size costs exactly
+  one write. Backpressure parks the connection fiber inside that write,
+  through the same loop a buffered flush uses.
+- An empty `write` is **refused**, not skipped: `0\r\n\r\n` is the terminator,
+  so a zero-length chunk written into the middle of a body ends the response
+  there and everything after it is read as trailers — silently, with a 200
+  already on the wire. A caller with nothing to send sends nothing.
+- A handler that returns without calling `finish()` gets the terminator
+  written for it. A handler that returns an **error** after the head has gone
+  out does not: the body is deliberately left unterminated and the connection
+  closes, because a truncated chunked message is how HTTP says a response is
+  broken and there is no status left to change.
+- A `HEAD` request gets the same head and no body at all, so every chunk is
+  dropped and no terminator is written.
+- `begin_stream` refuses a status that cannot carry a body (1xx, 204, 304), a
+  second call on the same request, a request that already armed a `Responder`,
+  and a handler-supplied `Content-Length`, `Transfer-Encoding` or `Connection`
+  — the last three through the same `std.http` gate every framed response
+  passes. A `TestHost` request refuses too, naming the server loop it needs.
+- Responses framed before the stream — pipelined requests in the same read —
+  go out ahead of the streamed head, because the head joins the output queue
+  rather than jumping it. `ServerStats.streamed` counts streamed responses;
+  they are counted in `responses` too.
+
+## Protocol upgrades
+
+A client that asks to switch protocols — a WebSocket handshake, an `h2c`
+upgrade, a `CONNECT` — reaches an endpoint registered with `map_upgrade`. The
+handler is handed the connection itself instead of a response to fill in.
+
+```beans
+pub class Chat implements espresso.UpgradeHandler {
+    pub fn init() {}
+
+    pub fn upgrade(context: espresso.HttpContext,
+                   request: http.Request,
+                   move stream: net.TcpStream) -> Result<bool> {
+        let room: string = context.request.route("room").or("")
+        let socket: websocket.Connection =
+            websocket.Connection.accept(move stream, request)?
+        return socket.send_text("welcome to {room}")
+    }
+}
+
+app.map_upgrade(r"/ws/{room}", new Chat())?
+```
+
+- **The middleware pipeline runs first**, exactly as it does for a request, so
+  authentication, cookies, an `Origin` check and rate limiting apply to a
+  handshake. A layer that answers instead of calling `next` is the answer, and
+  the socket is never handed over. That matters: `SameSite` does not protect a
+  handshake, so the `Origin` check is the control against cross-site WebSocket
+  hijacking, and an upgrade path that skipped the pipeline would skip it.
+- **Patterns are the ordinary route patterns.** Parameters and a trailing
+  catch-all work and are captured into `request.route_values` before the
+  handler runs. Upgrade endpoints live in their own table, so an ordinary route
+  may share the path — a page and its socket at the same URL is normal — and a
+  plain `GET` never reaches a handler that expects a socket.
+- **`request` is the raw parsed head**, which is what `accept_websocket` needs:
+  the handshake fields, the HTTP version and the method live there and not on
+  `HttpContext.request`.
+- **Reads on the handed-over socket park the fiber**, they do not hold the
+  worker thread, so many long-lived sockets share one worker: a handler
+  waiting 900 ms for its next frame is overtaken by one that arrives later and
+  waits less. `std.websocket` works over it directly, with no mode to change
+  first.
+- **Bytes that arrive after the handshake in the same read are a 400.** They
+  belong to the next protocol, this server has already consumed them, and a
+  `TcpStream` cannot carry them across the hand-off — so the handshake is
+  refused rather than a socket handed over whose first frames are missing.
+- **A handler that panics costs one connection.** It runs behind the same fiber
+  shield a request handler does; the panic is recorded server-side and the
+  server keeps accepting. There is no way to answer with a status afterwards,
+  because the socket is gone.
+- Responses framed before the upgrade — a pipelined `GET` in the same read —
+  are pushed to the client before the hand-off. `ServerStats.upgrades` counts
+  the connections that were given away; they produce no `responses` entry,
+  because the `101` is written by the protocol library and not by espresso.
+
+espresso itself imports no protocol library, so a program that registers no
+upgrade endpoint links no WebSocket bridge.
 
 ## Configuration
 

@@ -114,6 +114,19 @@ pub class WebApplication {
         return self.map("DELETE", pattern, handler)
     }
 
+    /// Registers a protocol-upgrade endpoint at `pattern`.
+    ///
+    /// A request that asks to switch protocols runs the same middleware
+    /// pipeline an ordinary request runs — authentication, cookies, an
+    /// `Origin` check, rate limiting all apply to a handshake — and only then
+    /// reaches this table. If a layer answers instead of calling `next`, that
+    /// answer is sent and the socket is never handed over.
+    pub fn map_upgrade(pattern: string,
+                       handler: UpgradeHandler) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        return self.router.map_upgrade(pattern, handler)
+    }
+
     fn run_pipeline(context: HttpContext, index: int) -> Result<bool> {
         if index >= self.middleware.len() {
             return self.router.dispatch(context)
@@ -128,9 +141,29 @@ pub class WebApplication {
         return layer(context, next)
     }
 
+    // The same walk with the upgrade table as its terminal. It is a second
+    // function rather than a parameterised one because the terminal is
+    // captured by the `next` closure at every depth, and one extra captured
+    // value on the ordinary request path is a cost every request would pay
+    // for a case that happens at most once per connection.
+    fn run_upgrade_pipeline(context: HttpContext, index: int) -> Result<bool> {
+        if index >= self.middleware.len() {
+            return self.router.dispatch_upgrade(context)
+        }
+        let layer: fn(HttpContext,
+            fn(HttpContext) -> Result<bool>) -> Result<bool> =
+            self.middleware[index]
+        let next: fn(HttpContext) -> Result<bool> =
+            fn(inner: HttpContext) -> Result<bool> {
+                return self.run_upgrade_pipeline(inner, index + 1)
+            }
+        return layer(context, next)
+    }
+
     /// One reusable per-connection context over the root provider.
     fn new_context(remote: net.Address) -> HttpContext {
-        return new HttpContext(new HttpRequest(remote), self.services)
+        return new HttpContext(
+            new HttpRequest(remote), self.services, self.options.server_header)
     }
 
     /// Resets `context` around a freshly parsed head, stamping a trace
@@ -150,21 +183,35 @@ pub class WebApplication {
         match self.run_pipeline(context, 0) {
             ok(_) => {}
             err(problem) => {
+                // A streamed response has already sent its head, so there is
+                // no status left to change and no body to replace: the
+                // connection truncates what was written and closes. Record it
+                // and hand the failure back rather than rendering a 500 into a
+                // response nobody will read.
+                // The connection records it: every failure that reaches the
+                // shield's join is recorded there, and recording it twice
+                // would put two lines in the log for one request.
+                if context.is_streaming() {
+                    return err(problem.msg, problem.kind)
+                }
                 // A 500 hides its detail from the client behind the generic
                 // message, so it must be recorded server-side first —
                 // otherwise that message's promise of a findable log is a
                 // lie. A 400 shows its own detail (it describes the client's
                 // input) and needs no record.
                 if problem.kind != "bad_request" &&
+                   problem.kind != "unsupported_media_type" &&
                    !context.response.completed {
                     self.record_failure(context, problem.msg)
                 }
                 self.write_failure(context, problem.msg, problem.kind)?
             }
         }
-        // A deferred request answers through its Responder; the buffered
-        // response object is never sent, so no defaults are stamped on it.
+        // A deferred request answers through its Responder, and a streamed
+        // one has already sent its head; the buffered response object is never
+        // sent in either case, so no defaults are stamped on it.
         if context.deferred { return ok(true) }
+        if context.is_streaming() { return ok(true) }
         if !context.response.completed {
             context.response.no_content()
         }
@@ -173,6 +220,58 @@ pub class WebApplication {
             // A framework header, not a handler's: add it straight so it does
             // not mark the response as carrying a custom header (the head cache
             // includes Server and stays usable when it is opted in).
+            context.response.headers.add("Server", self.options.server_header)
+        }
+        return ok(true)
+    }
+
+    /// Runs the pipeline for a request that asked to switch protocols.
+    ///
+    /// Afterwards exactly one of two things is true, and the connection fiber
+    /// reads which: either `context.claim_upgrade()` names an endpoint and no
+    /// response was completed — hand the socket over — or a response is ready
+    /// to send and the connection stays HTTP to the end.
+    ///
+    /// A layer that completed a response wins over a selected endpoint even if
+    /// it also called `next`. The socket is handed away irrevocably, so the
+    /// only safe direction to resolve that contradiction is the one that keeps
+    /// it: answer, and do not upgrade.
+    fn handle_upgrade_context(context: HttpContext) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        context.open_scope()?
+        match self.run_upgrade_pipeline(context, 0) {
+            ok(_) => {}
+            err(problem) => {
+                if problem.kind != "bad_request" &&
+                   problem.kind != "unsupported_media_type" &&
+                   !context.response.completed {
+                    self.record_failure(context, problem.msg)
+                }
+                self.write_failure(context, problem.msg, problem.kind)?
+            }
+        }
+        if context.deferred {
+            // respond_later on an upgrade would leave the connection waiting
+            // for a payload it can no longer frame, on a socket it may no
+            // longer own. Refuse the whole request instead of hanging.
+            context.response.reset()
+            self.record_failure(
+                context,
+                "a request that asked to switch protocols armed a Responder")
+            self.write_failure(
+                context,
+                "a protocol upgrade cannot defer its response", "upgrade")?
+        }
+        if context.response.completed {
+            // Whatever the terminal chose, an answer exists: keep the socket.
+            let dropped: Option<UpgradeHandler> = context.claim_upgrade()
+        } else if context.upgrade.is_some() {
+            return ok(true)
+        } else {
+            context.response.no_content()
+        }
+        if self.options.server_header != "" &&
+           !context.response.headers.has("Server") {
             context.response.headers.add("Server", self.options.server_header)
         }
         return ok(true)
@@ -223,6 +322,13 @@ pub class WebApplication {
                      detail: string, kind: string) -> Result<bool> {
         if kind == "bad_request" && !context.response.completed {
             return write_problem(context, 400, "Bad Request", detail)
+        }
+        // Like a 400, this one describes what the client sent — the media
+        // type it declared — so it is shown as it is rather than hidden
+        // behind a trace id.
+        if kind == "unsupported_media_type" && !context.response.completed {
+            return write_problem(
+                context, 415, "Unsupported Media Type", detail)
         }
         if !context.response.completed {
             let shown: string = if self.options.detailed_errors {

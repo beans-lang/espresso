@@ -12,7 +12,7 @@ fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
-    app.get("/items/\{id\}", item).expect("route")
+    app.get(r"/items/{id}", item).expect("route")
     let host: espresso.TestHost = new espresso.TestHost(app)
     let count: int = 20000
     let started: int = time.monotonic_nanos()

@@ -57,7 +57,7 @@ fn main() {
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
     app.use(middleware).expect("middleware")
-    app.get("/hello/\{name\}", hello).expect("hello")
+    app.get(r"/hello/{name}", hello).expect("hello")
     app.post("/json", json_echo).expect("json")
     app.get("/broken", broken).expect("broken")
 

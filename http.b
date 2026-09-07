@@ -4,7 +4,13 @@ import std.encoding.json
 import std.http
 import std.net
 
-/// Query fields in arrival order. Repeated names stay repeated.
+/// Named text fields in arrival order, repeated names kept repeated.
+///
+/// The same bag serves the three places a request carries name/value text:
+/// the query string, an `application/x-www-form-urlencoded` body, and the
+/// `Cookie` header. Order is preserved because `a=1&a=2` and `a=2&a=1` are
+/// different inputs, and `get` answers with the first, which is what every
+/// other server does.
 pub class QueryValues {
     names: List<string> = []
     values: List<string> = []
@@ -49,7 +55,26 @@ fn hex_value(byte: int) -> int {
     return -1
 }
 
-fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
+// Percent-decodes one component.
+//
+// `in_body` says whether this component came out of a request body rather
+// than the request target, and it decides two things.
+//
+// Control bytes: in a target one is an attack surface and never legitimate,
+// so every one is refused. In a form body they are ordinary data — a
+// `<textarea>` posts its newlines as `%0D%0A`, and refusing those would break
+// every multi-line field on the web. NUL stays refused in both, because
+// nothing legitimate posts one and it is a terminator to half the software
+// downstream. What a value carries is then refused at the boundaries it could
+// forge — a header value, a Set-Cookie — which is where the grammar that
+// could be broken actually lives.
+//
+// And the noun in the refusal, so a message about a form field does not say
+// "request target".
+fn decode_url_component(text: string,
+                        plus_as_space: bool,
+                        in_body: bool = false) -> Result<string> {
+    let subject: string = if in_body { "form field" } else { "request target" }
     var needs_decode: bool = false
     var checked: int = 0
     for checked < text.len() {
@@ -57,7 +82,10 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
         if byte == 37 || (plus_as_space && byte == 43) {
             needs_decode = true
         }
-        if byte == 0 || byte < 32 || byte == 127 {
+        if byte == 0 {
+            return err("a {subject} contains a NUL byte", "bad_request")
+        }
+        if !in_body && (byte < 32 || byte == 127) {
             return err("request target contains a control byte", "bad_request")
         }
         checked += 1
@@ -71,15 +99,18 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
         let byte: int = text.byte_at(index)
         if byte == 37 {
             if index + 2 >= text.len() {
-                return err("incomplete percent escape in request target", "bad_request")
+                return err("incomplete percent escape in {subject}", "bad_request")
             }
             let high: int = hex_value(text.byte_at(index + 1))
             let low: int = hex_value(text.byte_at(index + 2))
             if high < 0 || low < 0 {
-                return err("invalid percent escape in request target", "bad_request")
+                return err("invalid percent escape in {subject}", "bad_request")
             }
             let decoded: int = high * 16 + low
-            if decoded == 0 || decoded < 32 || decoded == 127 {
+            if decoded == 0 {
+                return err("a {subject} contains a NUL byte", "bad_request")
+            }
+            if !in_body && (decoded < 32 || decoded == 127) {
                 return err("request target contains a control byte", "bad_request")
             }
             target.push(decoded)
@@ -96,7 +127,13 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
     return ok(target.to_string())
 }
 
-fn parse_query_into(text: string, result: QueryValues) -> Result<bool> {
+// The one `name=value&…` parser. The query string and an
+// application/x-www-form-urlencoded body are the same grammar — that is what
+// the media type's name says — so they share it, and a field that decodes one
+// way in a URL decodes the same way in a body.
+fn parse_query_into(text: string,
+                    result: QueryValues,
+                    in_body: bool = false) -> Result<bool> {
     result.clear()
     if text == "" { return ok(true) }
     for pair: string in text.split("&") {
@@ -110,10 +147,22 @@ fn parse_query_into(text: string, result: QueryValues) -> Result<bool> {
             none => {}
         }
         result.add(
-            decode_url_component(name, true)?,
-            decode_url_component(value, true)?)
+            decode_url_component(name, true, in_body)?,
+            decode_url_component(value, true, in_body)?)
     }
     return ok(true)
+}
+
+/// True when `content_type` names `media`, whatever parameters follow it.
+/// `application/x-www-form-urlencoded; charset=UTF-8` is that media type, and
+/// the comparison is case-insensitive because the grammar says so.
+pub fn media_type_is(content_type: string, media: string) -> bool {
+    var head: string = content_type
+    match content_type.find(";") {
+        some(at) => { head = content_type.slice(0, at) }
+        none => {}
+    }
+    return head.trim().to_lower() == media.to_lower()
 }
 
 fn split_path_into(raw_path: string, segments: List<string>) -> Result<bool> {
@@ -164,6 +213,10 @@ pub unique class HttpRequest {
     segments_ready: bool = false
     query_cache: QueryValues = new QueryValues()
     query_ready: bool = false
+    cookie_cache: QueryValues = new QueryValues()
+    cookies_ready: bool = false
+    form_cache: QueryValues = new QueryValues()
+    form_ready: bool = false
 
     fn init(remote: net.Address) {
         self.remote = remote
@@ -183,6 +236,8 @@ pub unique class HttpRequest {
         self.route_values.clear()
         self.segments_ready = false
         self.query_ready = false
+        self.cookies_ready = false
+        self.form_ready = false
         if head.target == "" || head.target.byte_at(0) != 47 {
             return err("the request target must use origin form", "bad_request")
         }
@@ -268,6 +323,51 @@ pub unique class HttpRequest {
     pub fn route(name: string) -> Option<string> {
         return self.route_values.get(name)
     }
+
+    /// The `application/x-www-form-urlencoded` body's fields, in order, parsed
+    /// on first use and cached for this request.
+    ///
+    /// It is the query-string grammar, read from the body instead of the
+    /// target, through the same parser — so a repeated name stays repeated and
+    /// `+` is a space in both. A request whose Content-Type is something else
+    /// is an error of kind `unsupported_media_type`, which answers 415: a
+    /// handler that asked for form fields and got JSON has been sent the wrong
+    /// thing, and answering with an empty field set would make that a silent
+    /// wrong answer instead.
+    pub fn form() -> Result<QueryValues> {
+        if self.form_ready { return ok(self.form_cache) }
+        let declared: string = self.headers.get("Content-Type").or("")
+        if !media_type_is(declared, "application/x-www-form-urlencoded") {
+            return err(
+                "this endpoint reads an application/x-www-form-urlencoded body, not '{declared}'",
+                "unsupported_media_type")
+        }
+        parse_query_into(self.body.to_string(), self.form_cache, true)?
+        self.form_ready = true
+        return ok(self.form_cache)
+    }
+
+    /// The first form field named `name`, or `none`. Errors the way `form()`
+    /// does when the body is not a form.
+    pub fn form_field(name: string) -> Result<Option<string>> {
+        return ok(self.form()?.get(name))
+    }
+
+    /// Every cookie the client sent, in order, parsed on first use and cached
+    /// for this request. Values are exactly the bytes that arrived: a cookie
+    /// is opaque to RFC 6265, so nothing is decoded here and nothing was
+    /// encoded by `set_cookie`.
+    pub fn cookies() -> QueryValues {
+        if self.cookies_ready { return self.cookie_cache }
+        parse_cookies_into(self.headers, self.cookie_cache)
+        self.cookies_ready = true
+        return self.cookie_cache
+    }
+
+    /// The first cookie named `name`, or `none`.
+    pub fn cookie(name: string) -> Option<string> {
+        return self.cookies().get(name)
+    }
 }
 
 /// A buffered HTTP response. The server owns Content-Length and Connection.
@@ -323,6 +423,33 @@ pub unique class HttpResponse {
     pub fn header(name: string, value: string) {
         self.headers.add(name, value)
         self.has_custom = true
+    }
+
+    /// Adds one `Set-Cookie` header, refusing anything that would forge the
+    /// header's own structure.
+    ///
+    /// A cookie name or value carrying `;` writes an attribute the caller
+    /// never asked for, and one carrying CR or LF splices whole headers into
+    /// the response, so both are refused here — at the call that names the
+    /// cookie, and before anything is serialized. The refusal is a program
+    /// error (kind `cookie`), not a client one: it says which cookie and what
+    /// about it, and the request answers 500 with the detail in the server
+    /// log rather than shipping a broken response.
+    ///
+    /// Called more than once it adds more than one header, which is how
+    /// several cookies are set; a response carrying a cookie is never framed
+    /// from this connection's cached head.
+    ///
+    /// The attributes are always passed, never defaulted at this call: a
+    /// `new CookieOptions()` already carries the safe set (path `/`,
+    /// `HttpOnly`, `Secure`, `SameSite=Lax`, session lifetime), and writing it
+    /// out is what makes a deliberate `secure = false` on a development server
+    /// visible in the code that chose it.
+    pub fn set_cookie(name: string,
+                      value: string,
+                      options: CookieOptions) -> Result<bool> {
+        self.header("Set-Cookie", set_cookie_value(name, value, options)?)
+        return ok(true)
     }
 
     /// Finishes the response with a `Bytes` body, moved in without a copy.
@@ -423,12 +550,31 @@ pub class HttpContext {
     armed: bool = false
     reply: Option<Channel<Completion>> = none
     deferred: bool = false
+    // The upgrade endpoint the pipeline reached, for a request that asked to
+    // switch protocols. It is set by the router's upgrade terminal and read
+    // once by the connection fiber, which then owns the decision; nothing
+    // else in the pipeline may see a half-handed-over connection.
+    upgrade: Option<UpgradeHandler> = none
+    // The socket and the output queue this request will be answered through.
+    // Only the espresso server loop installs one; a TestHost context has
+    // none, which is why begin_stream refuses there and says so.
+    io: Option<ConnectionIo> = none
+    // The writer begin_stream handed to the handler. The connection reads it
+    // back after the handler returns, to terminate the body the handler may
+    // have left open.
+    stream: Option<ResponseStream> = none
+    // The Server header this application sends, if any. A buffered response
+    // gets it stamped after the pipeline; a streamed one has already sent its
+    // head by then, so begin_stream needs the value here.
+    server_header_value: string = ""
 
     pub fn init(move request: HttpRequest,
-                services: ServiceProvider) {
+                services: ServiceProvider,
+                server_header: string = "") {
         self.request = move request
         self.services = services
         self.root_services = services
+        self.server_header_value = server_header
     }
 
     /// A stable id for logs, formatted on first use.
@@ -446,13 +592,106 @@ pub class HttpContext {
         self.trace_text = ""
         self.deferred = false
         self.reply = none
+        self.upgrade = none
+        self.stream = none
         return self.request.begin(head)
     }
 
-    // The connection fiber arms its context once; the flag is all
-    // `respond_later` needs now that the reply channel is per-request.
-    fn arm_serving() {
+    // The connection fiber arms its context once, with the socket and queue
+    // its responses go through. The flag is all `respond_later` needs now that
+    // the reply channel is per-request; the io is what begin_stream needs.
+    fn arm_serving(io: ConnectionIo) {
         self.armed = true
+        self.io = some(io)
+    }
+
+    /// Begins a streamed response: sends the head now, and returns a writer
+    /// that frames each chunk as it is written.
+    ///
+    /// Use it when the body's length is not known when the head must go out.
+    /// The buffered path — return an `ActionResult` and let the router execute
+    /// it — stays the default and is faster for everything that fits in
+    /// memory; this one exists for the response that does not.
+    ///
+    /// The head carries `Transfer-Encoding: chunked`, this request's Date,
+    /// the application's `Server` header if one is configured, `content_type`
+    /// unless the handler already set a Content-Type, and every header the
+    /// handler added through `context.response.header(...)` before this call.
+    /// Headers added afterwards go nowhere: the head is already on the wire.
+    ///
+    /// The handler should call `finish()` when the body is complete. If it
+    /// returns without doing so the connection finishes the body for it. If it
+    /// returns an error instead, the body is deliberately left unterminated
+    /// and the connection closes — a truncated chunked message is how HTTP
+    /// says "this response is broken", and it is the only signal left once the
+    /// head has gone out.
+    pub fn begin_stream(status: int,
+                        content_type: string) -> Result<ResponseStream> {
+        if self.deferred {
+            return err(
+                "this request already armed a Responder; a deferred response is answered through it, not through a stream",
+                "stream")
+        }
+        if self.stream.is_some() {
+            return err("this request already began a streamed response",
+                       "stream")
+        }
+        match self.io {
+            none => {
+                return err(
+                    "streamed responses need the espresso server loop",
+                    "stream")
+            }
+            some(io) => {
+                let headers: http.Headers = self.response.headers
+                if content_type != "" && !headers.has("Content-Type") {
+                    headers.add("Content-Type", content_type)
+                }
+                if !headers.has("Date") {
+                    headers.add("Date", io.http_date())
+                }
+                if self.server_header_value != "" &&
+                   !headers.has("Server") {
+                    headers.add("Server", self.server_header_value)
+                }
+                // The head joins the output queue rather than jumping it, so
+                // responses to requests pipelined in front of this one go out
+                // first — the same ordering rule every other response obeys.
+                write_stream_head(
+                    io.output, status, reason_for(status), headers,
+                    self.request.keep_alive)?
+                io.flush()?
+                let writer: ResponseStream =
+                    new ResponseStream(io, self.head_only)
+                self.stream = some(writer)
+                self.response.completed = true
+                return ok(writer)
+            }
+        }
+    }
+
+    /// True once this request has begun a streamed response.
+    pub fn is_streaming() -> bool { return self.stream.is_some() }
+
+    // The connection reads the writer back after the handler returns, and
+    // clears it so the next request on this connection starts buffered.
+    fn claim_stream() -> Option<ResponseStream> {
+        let writer: Option<ResponseStream> = self.stream
+        self.stream = none
+        return writer
+    }
+
+    // The router's upgrade terminal names the endpoint it chose.
+    fn select_upgrade(handler: UpgradeHandler) {
+        self.upgrade = some(handler)
+    }
+
+    // Reads the selection and clears it, so one request hands the socket over
+    // at most once however the connection fiber is written.
+    fn claim_upgrade() -> Option<UpgradeHandler> {
+        let chosen: Option<UpgradeHandler> = self.upgrade
+        self.upgrade = none
+        return chosen
     }
 
     // The connection fiber takes the reply channel to wait on it; taking it

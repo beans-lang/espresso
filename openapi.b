@@ -3,10 +3,10 @@ package espresso
 import std.encoding.json
 
 fn openapi_operation_id(route: Route) -> string {
-    var name: string = route.pattern
+    var name: string = route.shape.pattern
         .replace("/", "_")
-        .replace("\{", "")
-        .replace("\}", "")
+        .replace(r"{", "")
+        .replace(r"}", "")
         .replace("*", "all_")
     for name.starts_with("_") {
         name = name.slice(1, name.len())
@@ -20,10 +20,11 @@ fn openapi_operation(route: Route) -> Result<json.Value> {
     operation.add("operationId", json.Value.from_string(
         openapi_operation_id(route)))?
     let parameters: json.Value = json.Value.array()
-    for index: int in 0..route.kinds.len() {
-        if route.kinds[index] == 0 { continue }
+    for index: int in 0..route.shape.kinds.len() {
+        if route.shape.kinds[index] == 0 { continue }
         let parameter: json.Value = json.Value.object()
-        parameter.add("name", json.Value.from_string(route.names[index]))?
+        parameter.add("name",
+                      json.Value.from_string(route.shape.names[index]))?
         parameter.add("in", json.Value.from_string("path"))?
         parameter.add("required", json.Value.from_bool(true))?
         let schema: json.Value = json.Value.object()
@@ -52,13 +53,14 @@ fn router_openapi(router: Router,
     let paths: json.Value = json.Value.object()
     for route: Route in router.routes {
         var path_item: json.Value = json.Value.object()
-        match paths.get(route.pattern) {
+        match paths.get(route.shape.pattern) {
             some(found) => { path_item = found }
-            none => { paths.add(route.pattern, path_item)? }
+            none => { paths.add(route.shape.pattern, path_item)? }
         }
         // Read it back after insertion because Value.add deep-copies into the
         // destination document.
-        let target: json.Value = paths.get(route.pattern).or(path_item)
+        let target: json.Value =
+            paths.get(route.shape.pattern).or(path_item)
         target.add(route.method.to_lower(), openapi_operation(route)?)?
     }
     document.add("paths", paths)?

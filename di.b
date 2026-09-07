@@ -292,7 +292,16 @@ pub class ServiceProvider {
         return ok(value)
     }
 
-    fn activate(implementation: reflect.Type) -> Result<reflect.Value> {
+    /// Constructs `implementation` by calling its public initializer with
+    /// every parameter resolved from this provider. The type itself needs no
+    /// registration — only its constructor's parameters do — so a framework
+    /// that mounts caller-written types (a page component, a handler object)
+    /// gets constructor injection without turning every one of them into a
+    /// service. The result is boxed; downcast it with `as?`.
+    ///
+    /// Every constructor parameter must be borrowed, and the initializer must
+    /// be public; either failure is reported here rather than at the call.
+    pub fn activate(implementation: reflect.Type) -> Result<reflect.Value> {
         let initializer: reflect.Initializer = self.initializer(implementation)?
         if !initializer.is_public() {
             return err(

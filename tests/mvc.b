@@ -71,7 +71,7 @@ pub class OrderController extends espresso.Controller {
 
     pub fn init(pricer: Pricer) { self.pricer = pricer }
 
-    @espresso.get(route: "/\{id\}")
+    @espresso.get(route: r"/{id}")
     pub fn show(@espresso.route id: int,
                 @espresso.query(default: "plain") style: string) ->
         Result<espresso.ActionResult> {
@@ -79,7 +79,7 @@ pub class OrderController extends espresso.Controller {
         return self.ok_text("order {id} style {style}")
     }
 
-    @espresso.get(route: "/\{id\}/price")
+    @espresso.get(route: r"/{id}/price")
     pub fn price(@espresso.route id: int,
                  @espresso.query count: int,
                  @espresso.header user_agent: string) ->
@@ -97,7 +97,7 @@ pub class OrderController extends espresso.Controller {
             "placed {order.sku} x{order.count} express {order.express} tags {order.tags.len()}")
     }
 
-    @espresso.post(route: "/\{id\}/notes")
+    @espresso.post(route: r"/{id}/notes")
     pub fn annotate(@espresso.route id: int,
                     @espresso.body move note: NoteRequest) ->
         Result<espresso.ActionResult> {
@@ -105,7 +105,7 @@ pub class OrderController extends espresso.Controller {
             "note on {id}: {note.text} for {note.order.sku}")
     }
 
-    @espresso.get(route: "/\{id\}/context")
+    @espresso.get(route: r"/{id}/context")
     pub fn with_context(context: espresso.HttpContext,
                         @espresso.route id: int,
                         @espresso.inject pricer: Pricer) ->

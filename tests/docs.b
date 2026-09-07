@@ -7,6 +7,7 @@ import std.encoding.json
 import std.http
 import std.io
 import std.log
+import std.reflect
 
 // ---- services and models from the README ----------------------------------
 
@@ -58,7 +59,7 @@ pub class NoteRequest {
 pub class HelloController extends espresso.Controller {
     pub fn init() {}
 
-    @espresso.get(route: "/\{name\}")
+    @espresso.get(route: r"/{name}")
     pub fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text("Hello, {name}!")
@@ -70,7 +71,7 @@ pub class NotesController extends espresso.Controller {
     pub fn init() {}
 
     @espresso.validate
-    @espresso.post(route: "/\{id\}")
+    @espresso.post(route: r"/{id}")
     pub fn annotate(@espresso.route id: int,
                     @espresso.query(default: "plain") style: string,
                     @espresso.header user_agent: string,
@@ -86,6 +87,31 @@ pub class NotesController extends espresso.Controller {
 
 fn plain(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     return espresso.text("plain")
+}
+
+// Activated, never registered: `activate` resolves this type's constructor
+// parameters from the provider it is called on, which is how a framework
+// mounts a caller-written type without first turning it into a service.
+pub class Dashboard {
+    clock: Clock
+    store: Store
+
+    pub fn init(clock: Clock, store: Store) {
+        self.clock = clock
+        self.store = store
+    }
+
+    pub fn title() -> string {
+        return "{self.store.label()}@{self.clock.now()}"
+    }
+}
+
+// Its initializer takes its argument by move, which `activate` cannot supply
+// from a container — the refusal names the parameter rather than failing at
+// the call.
+pub class Moved {
+    text: string
+    pub fn init(move text: string) { self.text = move text }
 }
 
 fn main() {
@@ -153,6 +179,37 @@ fn main() {
     let cache: Cache = scope.resolve<Cache>().expect("cache")
     io.println("scanned {cache.get("answer")}")
     scope.close().expect("scope close")
+
+    let scope2: espresso.ServiceProvider =
+        app.services.create_scope().expect("scope2")
+
+    // activate: a type the container never registered, constructed with its
+    // constructor parameters resolved from the scope
+    let mounted: reflect.Value =
+        scope2.activate(type_of(Dashboard)).expect("activate")
+    match mounted as? Dashboard {
+        some(page) => { io.println("activated {page.title()}") }
+        none => { io.println("activated WRONG TYPE") }
+    }
+    match scope2.activate(type_of(Moved)) {
+        ok(_) => { io.println("moved-parameter accepted (wrong)") }
+        err(problem) => { io.println("moved-parameter {problem.kind} {problem.msg}") }
+    }
+    scope2.close().expect("scope2 close")
+
+    // constant_time_equal answers the same as ==, without an early exit
+    let secrets: List<string> =
+        ["", "a", "ab", "abc", "abd", "abcd", "zbc", "abc "]
+    var mismatches: int = 0
+    var equal_pairs: int = 0
+    for left: string in secrets {
+        for right: string in secrets {
+            let constant: bool = espresso.constant_time_equal(left, right)
+            if constant { equal_pairs += 1 }
+            if constant != (left == right) { mismatches += 1 }
+        }
+    }
+    io.println("constant-time pairs {secrets.len() * secrets.len()} equal {equal_pairs} mismatches {mismatches}")
 
     // validation helpers stand alone too
     let errors: espresso.ValidationErrors = new espresso.ValidationErrors()
