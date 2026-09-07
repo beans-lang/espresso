@@ -153,9 +153,6 @@ pub class BytesResult implements ActionResult {
         self.content_type = content_type
     }
 
-    /// True until `execute` has handed the payload to a response.
-    pub fn has_body() -> bool { return self.slot.len() != 0 }
-
     pub fn execute(context: HttpContext) -> Result<bool> {
         if self.slot.len() == 0 {
             return err(
