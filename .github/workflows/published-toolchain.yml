@@ -14,31 +14,16 @@
 # then runs test.sh with nothing pointing at a checkout. If it passes, main is
 # installable. If it fails, main is not, and that is worth a red mark.
 #
-# ---------------------------------------------------------------------------
-# THIS JOB IS EXPECTED TO FAIL RIGHT NOW, AND THE FAILURE IS THE TRUE ANSWER.
-#
-# main calls http.encode_response_head_append, TcpStream.write_vectored and
-# TcpStream.write_vectored_text. All three land in beans-lang/beans#148, merged
-# 2026-09-07; the newest release, 0.1.39, was tagged 2026-09-06 and carries
-# none of them. So the checker stops on server.b with eight errors, and will
-# keep stopping until the Beans release carrying #148 is cut.
-#
-# It is red because the repository is in a red state, not because the check is
-# broken. It turns green by itself on the day that release ships — which is
-# also the signal that this package's documented floor can name a version
-# again (README "Versioning", CHANGELOG "Requirements"). The schedule below
-# exists for exactly that: the flip to green does not need anyone to open a PR.
-#
-# When it goes green, delete this block down to the line above the trigger and
-# leave the job. Do not delete the job to make the tab green.
-# ---------------------------------------------------------------------------
+# The floor this answers for is Beans 0.1.40, the release that carries
+# beans-lang/beans#148. It was red for a day between that merge and that
+# release — issue #9 — which is the state this job exists to make visible.
 #
 # The native leg (test.sh --native) is deliberately not here. It runs
-# rss_gate.sh, whose pass mark is a resident-memory threshold tuned against a
-# target that #148 itself moves; a threshold miss on a shared runner would make
-# this job red for a reason that has nothing to do with installability, which
-# is the one thing it is here to answer. It belongs in a separate job once the
-# floor is a real release and the threshold is settled.
+# rss_gate.sh, whose pass mark is a resident-memory threshold; a threshold miss
+# on a shared runner would make this job red for a reason that has nothing to
+# do with installability, which is the one thing it is here to answer. It
+# belongs in a separate job with a limit set from what a runner actually does,
+# not from what a laptop does.
 
 name: published toolchain
 
@@ -47,7 +32,8 @@ on:
     branches: ["main"]
   pull_request:
   schedule:
-    # Daily, so the day the Beans release lands this flips to green on its own.
+    # Daily, so a release that moves out from under this package is a red mark
+    # here and not a user's bug report.
     - cron: "17 6 * * *"
   workflow_dispatch:
 

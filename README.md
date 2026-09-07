@@ -36,11 +36,6 @@ fn main() {
 For a real application — stores behind interfaces, auth policies,
 validation, a rendered dashboard — read `examples/taskhub/main.b`.
 
-**`main` does not build on any released Beans today**; it needs a
-compiler built from `beans-lang/beans` `main`. *Versioning*, at the
-bottom, says which entry points are missing and what removes the
-restriction.
-
 ## Controllers
 
 A controller is a class marked `@espresso.controller(route: prefix)`.
@@ -247,22 +242,36 @@ the reflection speed that makes controllers a first-class path, and
 panic reclaims its frame on 0.1.35 and later, within the platform limits
 noted under *The server*.
 
-**No released Beans compiles `main`.** The server frames a response head
-once and sends a large body beside it with a single vectored write, and
-that path calls three entry points that landed in
-[beans-lang/beans#148](https://github.com/beans-lang/beans/pull/148) on
-2026-09-07: `std.http.encode_response_head_append`,
-`std.net.TcpStream.write_vectored`, and `write_vectored_text`. The newest
-release, 0.1.39, was tagged the day before that merge and carries none of
-them, so an installed `beansc` stops in the checker on `server.b` —
-eight errors, six of them for `encode_response_head_append` alone —
-without ever reaching codegen. There is no compatibility path to fall
-back on: the borrowed-payload send is how a large response avoids being
-staged in a per-connection buffer, so the older stdlib cannot express it.
+**Beans 0.1.40 or newer is the floor.** The server frames a response
+head once and sends a large body beside it with a single vectored write,
+and that path calls three entry points that landed in
+[beans-lang/beans#148](https://github.com/beans-lang/beans/pull/148):
+`std.http.encode_response_head_append`,
+`std.net.TcpStream.write_vectored`, and `write_vectored_text`. They first
+ship in 0.1.40. On 0.1.39 or older an installed `beansc` stops in the
+checker on `server.b` — eight errors, six of them for
+`encode_response_head_append` alone — without ever reaching codegen, and
+there is no compatibility path to fall back on: the borrowed-payload send
+is how a large response avoids being staged in a per-connection buffer,
+so the older stdlib cannot express it.
 
-Until that release is cut, build against a `beansc` from
-`beans-lang/beans` `main` — `make` in that checkout, then point
-`BEANSC` at `build/beansc` or `BEANS_ROOT` at the checkout, which is the
-order `test.sh` and `rss_gate.sh` resolve the compiler in. This floor
-becomes that release's number the day it exists
-([#9](https://github.com/beans-lang/espresso/issues/9)).
+Building against a Beans checkout rather than an install works too, but
+a tree-built `beansc` resolves the runtime and stdlib **relative to the
+working directory**, and an installed one exports its own package's
+paths — so pointing `BEANSC` at `build/beansc` is not on its own enough.
+Pin the roots with it:
+
+```sh
+B=../../beans
+env BEANSC=$B/build/beansc \
+    BEANS_RUNTIME=$B/runtime/beans_rt.c \
+    BEANS_STDLIB=$B/stdlib/std \
+    BEANS_ENCODING=$B/runtime/encoding \
+    BEANS_NET=$B/runtime/net \
+    BEANS_LOG=$B/runtime/log \
+  ./test.sh
+```
+
+`test.sh` and `rss_gate.sh` do this for you when `BEANS_ROOT` points at
+the checkout: they `cd` into it first, which is what makes the relative
+roots resolve.
