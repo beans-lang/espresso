@@ -13,7 +13,7 @@ import espresso
 pub class HelloController extends espresso.Controller {
     pub fn init() {}
 
-    @espresso.get(route: "/\{name\}")
+    @espresso.get(route: r"/{name}")
     pub fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text("Hello, {name}!")
@@ -74,7 +74,7 @@ Action parameters bind by annotation, compiled once at map time into
 typed extractors — a request runs no reflection lookups.
 
 ```beans
-@espresso.post(route: "/\{id\}/notes")
+@espresso.post(route: r"/{id}/notes")
 pub fn annotate(@espresso.route id: int,
                 @espresso.query(default: "plain") style: string,
                 @espresso.header user_agent: string,

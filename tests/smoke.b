@@ -16,7 +16,7 @@ pub class SmokeController extends espresso.Controller {
 
     pub fn init(greeting: SmokeGreeting) { self.greeting = greeting }
 
-    @espresso.get(route: "/hello/\{name\}")
+    @espresso.get(route: r"/hello/{name}")
     pub fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text(self.greeting.text(name))

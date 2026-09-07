@@ -59,7 +59,7 @@ pub class NoteRequest {
 pub class HelloController extends espresso.Controller {
     pub fn init() {}
 
-    @espresso.get(route: "/\{name\}")
+    @espresso.get(route: r"/{name}")
     pub fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text("Hello, {name}!")
@@ -71,7 +71,7 @@ pub class NotesController extends espresso.Controller {
     pub fn init() {}
 
     @espresso.validate
-    @espresso.post(route: "/\{id\}")
+    @espresso.post(route: r"/{id}")
     pub fn annotate(@espresso.route id: int,
                     @espresso.query(default: "plain") style: string,
                     @espresso.header user_agent: string,

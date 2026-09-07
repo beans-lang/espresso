@@ -159,8 +159,8 @@ fn run_case(label: string, path: string, count: int, body_len: int,
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
-    app.get("/s/\{id\}", small).expect("route s")
-    app.get("/b/\{id\}", big).expect("route b")
+    app.get(r"/s/{id}", small).expect("route s")
+    app.get(r"/b/{id}", big).expect("route b")
 
     let options: espresso.ServerOptions = new espresso.ServerOptions()
     options.port = 0

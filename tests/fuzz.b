@@ -20,7 +20,7 @@ fn main() {
     let builder: espresso.WebApplicationBuilder =
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("app")
-    app.get("/\{*path\}", endpoint).expect("catch all")
+    app.get(r"/{*path}", endpoint).expect("catch all")
 
     let invalid: List<string> = [
         "", "relative", "/bad%", "/bad%2", "/bad%GG",
@@ -53,7 +53,7 @@ fn main() {
         }
     }
     io.println("targets refused {refused} accepted {accepted}")
-    match app.get("/\{*other\}", endpoint) {
+    match app.get(r"/{*other}", endpoint) {
         ok(_) => io.println("conflict accepted"),
         err(error) => io.println("conflict {error.kind}"),
     }

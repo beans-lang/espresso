@@ -15,7 +15,7 @@ pub class HelloController extends espresso.Controller {
 
     pub fn init(greeter: GreetingService) { self.greeter = greeter }
 
-    @espresso.get(route: "/hello/\{name\}")
+    @espresso.get(route: r"/hello/{name}")
     pub fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text(self.greeter.text(name))
@@ -71,7 +71,7 @@ fn main_app() -> Result<bool> {
     io.println("cors {preflight.status} {preflight.headers.get("Access-Control-Allow-Origin").or("")}")
 
     let spec: espresso.TestResponse = host.get("/openapi.json")?
-    io.println("openapi {spec.status} {spec.text().contains("\"openapi\":\"3.1.0\"")} {spec.text().contains("/api/hello/\{name\}")}")
+    io.println("openapi {spec.status} {spec.text().contains("\"openapi\":\"3.1.0\"")} {spec.text().contains(r"/api/hello/{name}")}")
     host.close()?
     return ok(true)
 }

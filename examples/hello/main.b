@@ -13,7 +13,7 @@ fn main() {
         new espresso.WebApplicationBuilder()
     let app: espresso.WebApplication = builder.build().expect("build app")
     app.use(espresso.security_headers).expect("security headers")
-    app.get("/hello/\{name\}", hello).expect("map route")
+    app.get(r"/hello/{name}", hello).expect("map route")
     espresso.map_openapi(app).expect("map OpenAPI")
 
     let options: espresso.ServerOptions = new espresso.ServerOptions()

@@ -280,7 +280,7 @@ pub class ProjectsController extends espresso.Controller {
         return self.ok(json.encode(move views)?)
     }
 
-    @espresso.get(route: "/\{id\}")
+    @espresso.get(route: r"/{id}")
     pub fn show(@espresso.route id: int) ->
         Result<espresso.ActionResult> {
         match self.store.find(id) {
@@ -301,7 +301,7 @@ pub class ProjectsController extends espresso.Controller {
         return self.created(json.encode(project_view(made))?)
     }
 
-    @espresso.get(route: "/\{id\}/tasks")
+    @espresso.get(route: r"/{id}/tasks")
     pub fn tasks(@espresso.route id: int,
                  @espresso.query(required: false) status: string) ->
         Result<espresso.ActionResult> {
@@ -321,7 +321,7 @@ pub class ProjectsController extends espresso.Controller {
 
     @espresso.auth
     @espresso.validate
-    @espresso.post(route: "/\{id\}/tasks")
+    @espresso.post(route: r"/{id}/tasks")
     pub fn add_task(@espresso.route id: int,
                     @espresso.body move request: CreateTask) ->
         Result<espresso.ActionResult> {
@@ -334,7 +334,7 @@ pub class ProjectsController extends espresso.Controller {
     }
 
     @espresso.auth(policy: "admin")
-    @espresso.delete(route: "/\{id\}")
+    @espresso.delete(route: r"/{id}")
     pub fn remove(@espresso.route id: int) ->
         Result<espresso.ActionResult> {
         if self.store.remove(id) { return self.no_content() }
@@ -351,7 +351,7 @@ pub class TasksController extends espresso.Controller {
     @espresso.auth
     @espresso.validate
     @espresso.limit(rpm: 120)
-    @espresso.patch(route: "/\{id\}")
+    @espresso.patch(route: r"/{id}")
     pub fn move_task(@espresso.route id: int,
                      @espresso.body move request: MoveTask) ->
         Result<espresso.ActionResult> {

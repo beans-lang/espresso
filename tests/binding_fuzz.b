@@ -68,7 +68,7 @@ pub class FuzzController extends espresso.Controller {
         return self.ok_text("{outer.inner.label}@{outer.depth}")
     }
 
-    @espresso.get(route: "/typed/\{id\}")
+    @espresso.get(route: r"/typed/{id}")
     pub fn typed(@espresso.route id: int,
                  @espresso.query(required: false) flag: bool,
                  @espresso.query(default: "7") level: int) ->

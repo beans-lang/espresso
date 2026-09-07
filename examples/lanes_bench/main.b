@@ -20,7 +20,7 @@ pub class BenchController extends espresso.Controller {
 
     pub fn init(greeting: Greeting) { self.greeting = greeting }
 
-    @espresso.get(route: "/hello/\{name\}")
+    @espresso.get(route: r"/hello/{name}")
     pub fn hello(@espresso.route name: string) ->
         Result<espresso.ActionResult> {
         return self.ok_text(self.greeting.line(name))
@@ -62,7 +62,7 @@ fn main() {
     espresso.add_controllers(builder).expect("add")
     let app: espresso.WebApplication = builder.build().expect("app")
     espresso.map_controllers(app).expect("map")
-    app.get("/f/hello/\{name\}", free_hello).expect("free")
+    app.get(r"/f/hello/{name}", free_hello).expect("free")
 
     let host: espresso.TestHost = new espresso.TestHost(app)
     let count: int = 50000
