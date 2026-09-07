@@ -114,6 +114,19 @@ pub class WebApplication {
         return self.map("DELETE", pattern, handler)
     }
 
+    /// Registers a protocol-upgrade endpoint at `pattern`.
+    ///
+    /// A request that asks to switch protocols runs the same middleware
+    /// pipeline an ordinary request runs — authentication, cookies, an
+    /// `Origin` check, rate limiting all apply to a handshake — and only then
+    /// reaches this table. If a layer answers instead of calling `next`, that
+    /// answer is sent and the socket is never handed over.
+    pub fn map_upgrade(pattern: string,
+                       handler: UpgradeHandler) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        return self.router.map_upgrade(pattern, handler)
+    }
+
     fn run_pipeline(context: HttpContext, index: int) -> Result<bool> {
         if index >= self.middleware.len() {
             return self.router.dispatch(context)
@@ -124,6 +137,25 @@ pub class WebApplication {
         let next: fn(HttpContext) -> Result<bool> =
             fn(inner: HttpContext) -> Result<bool> {
                 return self.run_pipeline(inner, index + 1)
+            }
+        return layer(context, next)
+    }
+
+    // The same walk with the upgrade table as its terminal. It is a second
+    // function rather than a parameterised one because the terminal is
+    // captured by the `next` closure at every depth, and one extra captured
+    // value on the ordinary request path is a cost every request would pay
+    // for a case that happens at most once per connection.
+    fn run_upgrade_pipeline(context: HttpContext, index: int) -> Result<bool> {
+        if index >= self.middleware.len() {
+            return self.router.dispatch_upgrade(context)
+        }
+        let layer: fn(HttpContext,
+            fn(HttpContext) -> Result<bool>) -> Result<bool> =
+            self.middleware[index]
+        let next: fn(HttpContext) -> Result<bool> =
+            fn(inner: HttpContext) -> Result<bool> {
+                return self.run_upgrade_pipeline(inner, index + 1)
             }
         return layer(context, next)
     }
@@ -173,6 +205,57 @@ pub class WebApplication {
             // A framework header, not a handler's: add it straight so it does
             // not mark the response as carrying a custom header (the head cache
             // includes Server and stays usable when it is opted in).
+            context.response.headers.add("Server", self.options.server_header)
+        }
+        return ok(true)
+    }
+
+    /// Runs the pipeline for a request that asked to switch protocols.
+    ///
+    /// Afterwards exactly one of two things is true, and the connection fiber
+    /// reads which: either `context.claim_upgrade()` names an endpoint and no
+    /// response was completed — hand the socket over — or a response is ready
+    /// to send and the connection stays HTTP to the end.
+    ///
+    /// A layer that completed a response wins over a selected endpoint even if
+    /// it also called `next`. The socket is handed away irrevocably, so the
+    /// only safe direction to resolve that contradiction is the one that keeps
+    /// it: answer, and do not upgrade.
+    fn handle_upgrade_context(context: HttpContext) -> Result<bool> {
+        if self.closed { return err("the application is closed", "closed") }
+        context.open_scope()?
+        match self.run_upgrade_pipeline(context, 0) {
+            ok(_) => {}
+            err(problem) => {
+                if problem.kind != "bad_request" &&
+                   !context.response.completed {
+                    self.record_failure(context, problem.msg)
+                }
+                self.write_failure(context, problem.msg, problem.kind)?
+            }
+        }
+        if context.deferred {
+            // respond_later on an upgrade would leave the connection waiting
+            // for a payload it can no longer frame, on a socket it may no
+            // longer own. Refuse the whole request instead of hanging.
+            context.response.reset()
+            self.record_failure(
+                context,
+                "a request that asked to switch protocols armed a Responder")
+            self.write_failure(
+                context,
+                "a protocol upgrade cannot defer its response", "upgrade")?
+        }
+        if context.response.completed {
+            // Whatever the terminal chose, an answer exists: keep the socket.
+            let dropped: Option<UpgradeHandler> = context.claim_upgrade()
+        } else if context.upgrade.is_some() {
+            return ok(true)
+        } else {
+            context.response.no_content()
+        }
+        if self.options.server_header != "" &&
+           !context.response.headers.has("Server") {
             context.response.headers.add("Server", self.options.server_header)
         }
         return ok(true)

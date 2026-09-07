@@ -1,0 +1,20 @@
+websocket bridge true
+duplicate route_conflict
+relative route
+greeting hello echo room=lobby sid=-
+echo echo:one
+echo echo:two
+cookie+origin HTTP/1.1 101 Switching Protocols | hello echo room=lobby sid=abc123
+bad-origin HTTP/1.1 403 Forbidden
+no-endpoint HTTP/1.1 400 Bad Request
+remainder HTTP/1.1 400 Bad Request
+pipelined 200 OK then 101 Switching Protocols
+sequential HTTP/1.1 200 OK [plain-body] then HTTP/1.1 101 Switching Protocols | hello echo room=lobby sid=-
+connect HTTP/1.1 400 Bad Request
+h2c HTTP/1.1 400 Bad Request
+deferred HTTP/1.1 500 Internal Server Error
+panicking HTTP/1.1 101 Switching Protocols | about to fail
+dropped <closed with no answer>
+line HTTP/1.1 101 Switching Protocols | line-ready alpha body[HELLO] | said:ping-1 | line-done
+plain-get HTTP/1.1 200 OK
+accepted 14 requests 15 responses 8 upgrades 7

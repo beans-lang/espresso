@@ -27,6 +27,15 @@ const vectored_body_min: int = 16384
 // kilobyte and not the largest batch it ever framed.
 const output_queue_reserve: int = 1024
 
+// What the three write paths say if they are ever reached after an upgrade
+// endpoint took the socket. Nothing should reach them — the connection loop
+// ends on the same event that hands the socket over, and the output queue is
+// pushed before the hand-off — so this is the guard that turns a would-be
+// use-after-move into a named error instead of an index panic.
+const handed_off_detail: string =
+    "this connection was handed to another protocol and can no longer be written"
+
+
 /// Bounds for the listener, parser, connections, bodies, and output queues.
 pub class ServerOptions {
     pub host: string = "127.0.0.1"
@@ -136,6 +145,10 @@ pub class ServerStats {
     /// `max_queued_output_bytes` was released after its flush, rather than kept
     /// for the connection's life.
     pub output_buffers_released: int = 0
+    /// How many connections were handed to another protocol through an
+    /// upgrade endpoint. Such a connection produces no `responses` entry —
+    /// the 101 is written by the protocol library, not by this server.
+    pub upgrades: int = 0
 
     pub fn init() {}
 }
@@ -329,16 +342,49 @@ fn shielded_handle(app: WebApplication,
     }
 }
 
+// Runs an upgrade handler on a child fiber, for the reason shielded_handle
+// exists: connection_main owns this connection's ledger entry, and a panic
+// that abandoned its frames would strand a descriptor the graceful sweep
+// still reaches for. The socket has already been given away by the time this
+// is called, so a contained panic costs this one connection and nothing else.
+fn shielded_upgrade(handler: UpgradeHandler,
+                    context: HttpContext,
+                    head: http.Request,
+                    move stream: net.TcpStream) -> Result<bool> {
+    let ran: Brew<Result<bool>> =
+        brew handler.upgrade(context, head, move stream)
+    match ran.join() {
+        ok(outcome) => { return outcome }
+        err(problem) => { return err(problem.msg, problem.kind) }
+    }
+}
+
 // One connection's whole life, owned by one fiber. Reads park in the
 // netpoller, writes flush inline, and a deferred request waits right here
 // in request order — the old pause/replay machinery is simply the fiber's
 // program counter now.
 unique class ServerConnection {
-    stream: net.TcpStream
+    // The socket, parked in a one-slot list rather than held in a plain
+    // field. A field of a move-only type cannot be moved out — the language
+    // says so and names the way around it: "field and index moves need
+    // consuming accessors such as List `remove`" (beans spec/SYNTAX.md) — and
+    // an upgrade endpoint is handed the socket by value, for keeps. `remove`
+    // yields the stream and leaves the list empty, which is also the flag:
+    // an empty list means this connection no longer owns anything to read,
+    // write or close.
+    socket: List<net.TcpStream> = []
     peer: net.Address
     parser: http.RequestParser
     context: Option<HttpContext> = none
     have_head: bool = false
+    // Set when the head just parsed asked to switch protocols. The parser
+    // still reports `done` for such a message — it emits head, done and
+    // upgraded together, in that order, in one batch however the bytes were
+    // split — and dispatching that `done` would serve the handshake as an
+    // ordinary GET and frame a response onto a connection that is about to
+    // belong to another protocol. So `done` is skipped and the `upgraded`
+    // event that follows does the work.
+    upgrade_pending: bool = false
     events: List<http.RequestEvent> = []
     read_buffer: Bytes
     output: Bytes = new Bytes(0)
@@ -364,7 +410,7 @@ unique class ServerConnection {
     fn init(move stream: net.TcpStream,
             peer: net.Address,
             options: ServerOptions) {
-        self.stream = move stream
+        self.socket.push(move stream)
         self.peer = peer
         let limits: http.Limits = new http.Limits()
         limits.max_header_count = options.max_header_count
@@ -379,6 +425,10 @@ unique class ServerConnection {
     }
 
     fn has_output() -> bool { return self.output.len() > 0 }
+
+    // True while this connection still owns its socket. It stops being true
+    // exactly once, when an upgrade endpoint takes it.
+    fn owns_socket() -> bool { return self.socket.len() != 0 }
 
     // The RFC 9110 Date value for a response framed right now, as
     // IMF-fixdate in GMT — the only form a sender is allowed to generate.
@@ -586,10 +636,11 @@ unique class ServerConnection {
     // order by construction: the body cannot overtake what was queued before
     // it, and nothing can be framed behind it until this returns.
     fn flush_with_body(body: Bytes, stats: ServerStats) -> Result<bool> {
+        if !self.owns_socket() { return err(handed_off_detail, "upgraded") }
         var offset: int = 0
         let total: int = self.output.len() + body.len()
         for offset < total {
-            match self.stream.write_vectored(self.output, body, offset) {
+            match self.socket[0].write_vectored(self.output, body, offset) {
                 ok(count) => {
                     if count <= 0 {
                         return err("the connection accepted no output",
@@ -613,10 +664,12 @@ unique class ServerConnection {
     // is flush_with_body's: the queued output goes in front of the body in the
     // same write, so pipelined responses keep their order by construction.
     fn flush_with_text(text: string, stats: ServerStats) -> Result<bool> {
+        if !self.owns_socket() { return err(handed_off_detail, "upgraded") }
         var offset: int = 0
         let total: int = self.output.len() + text.len()
         for offset < total {
-            match self.stream.write_vectored_text(self.output, text, offset) {
+            match self.socket[0].write_vectored_text(
+                    self.output, text, offset) {
                 ok(count) => {
                     if count <= 0 {
                         return err("the connection accepted no output",
@@ -857,6 +910,7 @@ unique class ServerConnection {
                                     none => {}
                                 }
                                 self.previous_head = some(request)
+                                self.upgrade_pending = request.upgrade
                             }
                             err(problem) => {
                                 self.append_error(
@@ -898,6 +952,9 @@ unique class ServerConnection {
             }
             done(keep_alive) => {
                 self.have_head = false
+                // The upgrade event decides this message's fate; see
+                // upgrade_pending.
+                if self.upgrade_pending { return ok(true) }
                 self.dispatch(app, keep_alive, options, stats)?
                 // The response is sent; a body buffer that outgrew one read is
                 // no longer needed and must not be carried for the life of the
@@ -913,14 +970,119 @@ unique class ServerConnection {
                 }
             }
             upgraded(request, remainder) => {
-                self.append_error(
-                    400, "Bad Request",
-                    "protocol upgrades are not enabled", false, options)?
-                self.close_after_write = true
-                return ok(false)
+                return self.hand_off_protocol(
+                    request, remainder, app, options, stats)
             }
         }
         return ok(true)
+    }
+
+    // A client that asked to switch protocols. The parser is finished with
+    // this connection either way — whatever follows the head belongs to the
+    // next protocol — so there is no path back to serving ordinary requests
+    // from here, and every branch below ends the loop.
+    //
+    // The pipeline runs first, exactly as it does for a request: an upgrade
+    // that skipped it would skip authentication, the session cookie and the
+    // `Origin` check, which is precisely the set of checks a cross-site
+    // WebSocket hijack needs skipped. Only after a layer has let the request
+    // through, and only if an upgrade endpoint matched, does the socket move.
+    fn hand_off_protocol(head: http.Request,
+                         remainder: Bytes,
+                         app: WebApplication,
+                         options: ServerOptions,
+                         stats: ServerStats) -> Result<bool> {
+        self.have_head = false
+        self.upgrade_pending = false
+        self.close_after_write = true
+        self.requests += 1
+        stats.requests += 1
+        match self.context {
+            none => {
+                return err("an upgrade arrived without a context", "state")
+            }
+            some(active) => {
+                // Bytes after the head are the next protocol's, and this
+                // server has not yet decided that there is a next protocol.
+                // They cannot be put back and a handler given the socket would
+                // start mid-stream, so refuse the handshake rather than hand
+                // over a connection whose first frames are already spent.
+                if remainder.len() > 0 {
+                    match active.close() {
+                        ok(_) => {}
+                        err(_) => { stats.connection_errors += 1 }
+                    }
+                    self.append_error(
+                        400, "Bad Request",
+                        "bytes arrived after the upgrade request, so this connection cannot be handed to another protocol",
+                        false, options)?
+                    stats.responses += 1
+                    return ok(false)
+                }
+                active.request.keep_alive = false
+                match app.handle_upgrade_context(active) {
+                    ok(_) => {}
+                    err(problem) => {
+                        app.record_failure(active, problem.msg)
+                        match active.close() {
+                            ok(_) => {}
+                            err(_) => { stats.connection_errors += 1 }
+                        }
+                        active.response.reset()
+                        app.write_failure(
+                            active, problem.msg, problem.kind)?
+                        if app.server_header() != "" &&
+                           !active.response.headers.has("Server") {
+                            active.response.header(
+                                "Server", app.server_header())
+                        }
+                        self.append_response_from(
+                            active.response, false, false, options, stats)?
+                        stats.responses += 1
+                        return ok(false)
+                    }
+                }
+                match active.claim_upgrade() {
+                    none => {
+                        // A layer answered, or no endpoint speaks this path.
+                        let queued: Result<bool> = self.append_response_from(
+                            active.response, false, active.head_only,
+                            options, stats)
+                        let closed: Result<bool> = active.close()
+                        queued?
+                        closed?
+                        stats.responses += 1
+                        return ok(false)
+                    }
+                    some(handler) => {
+                        // Pipelined responses framed before this request are
+                        // still in the output queue. They go out first: the
+                        // next protocol's first bytes must not overtake the
+                        // answers to requests that preceded it, and after the
+                        // hand-off there is nothing left to send them with.
+                        if self.has_output() { self.flush(stats)? }
+                        stats.upgrades += 1
+                        let outcome: Result<bool> = shielded_upgrade(
+                            handler, active, head, self.socket.remove(0))
+                        // The request scope outlives the handshake and is
+                        // released here, after the handler has finished with
+                        // the connection — a socket handler holds services for
+                        // as long as it holds the socket.
+                        match active.close() {
+                            ok(_) => {}
+                            err(_) => { stats.connection_errors += 1 }
+                        }
+                        match outcome {
+                            ok(_) => { return ok(false) }
+                            err(problem) => {
+                                app.record_failure(active, problem.msg)
+                                return err(problem.msg, problem.kind)
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn absorb(app: WebApplication,
@@ -948,14 +1110,32 @@ unique class ServerConnection {
                 self.flush(stats)?
             }
         }
+        // A head that asked to switch protocols is answered by the `upgraded`
+        // event, which the parser emits in the same batch. Reaching the end of
+        // a batch with the flag still set means it did not, so the request
+        // would sit unanswered until the idle timeout — refuse it here
+        // instead, with the reason, and close.
+        if self.upgrade_pending {
+            self.upgrade_pending = false
+            self.requests += 1
+            stats.requests += 1
+            self.append_error(
+                400, "Bad Request",
+                "the request asked to switch protocols but the parser handed over no connection",
+                false, options)?
+            stats.responses += 1
+            self.close_after_write = true
+            return ok(false)
+        }
         return ok(true)
     }
 
     // Pushes the whole output queue to the peer, parking on backpressure.
     fn flush(stats: ServerStats) -> Result<bool> {
+        if !self.owns_socket() { return err(handed_off_detail, "upgraded") }
         var offset: int = 0
         for offset < self.output.len() {
-            match self.stream.write_from(self.output, offset) {
+            match self.socket[0].write_from(self.output, offset) {
                 ok(count) => {
                     if count <= 0 {
                         return err("the connection accepted no output",
@@ -976,12 +1156,12 @@ unique class ServerConnection {
     fn serve(app: WebApplication,
              options: ServerOptions,
              stats: ServerStats) -> bool {
-        let armed: Result<bool> = self.stream.set_timeouts(
+        let armed: Result<bool> = self.socket[0].set_timeouts(
             options.idle_timeout_ms, options.idle_timeout_ms)
         for !self.close_after_write {
             // wait-first: between requests the socket is drained, so the
             // speculative recv would only say would-block.
-            match self.stream.read_into_waiting(self.read_buffer) {
+            match self.socket[0].read_into_waiting(self.read_buffer) {
                 ok(count) => {
                     if count == 0 {
                         self.close_after_write = true
@@ -1055,7 +1235,14 @@ unique class ServerConnection {
         return true
     }
 
-    fn close() -> Result<bool> { return self.stream.close() }
+    // Closing a connection whose socket went to another protocol is a
+    // no-op, not an error: the handler owns that descriptor now and closing
+    // it here would shut a live conversation — or, worse, a descriptor the
+    // kernel has since reissued to someone else.
+    fn close() -> Result<bool> {
+        if !self.owns_socket() { return ok(true) }
+        return self.socket[0].close()
+    }
 }
 
 

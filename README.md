@@ -305,6 +305,65 @@ its frame and leaks what the request held, so a Windows deployment should
 treat a panicking handler as a resource leak until a COFF unwind lands in
 the compiler.
 
+## Protocol upgrades
+
+A client that asks to switch protocols — a WebSocket handshake, an `h2c`
+upgrade, a `CONNECT` — reaches an endpoint registered with `map_upgrade`. The
+handler is handed the connection itself instead of a response to fill in.
+
+```beans
+pub class Chat implements espresso.UpgradeHandler {
+    pub fn init() {}
+
+    pub fn upgrade(context: espresso.HttpContext,
+                   request: http.Request,
+                   move stream: net.TcpStream) -> Result<bool> {
+        let room: string = context.request.route("room").or("")
+        stream.set_nonblocking(false)?
+        let socket: websocket.Connection =
+            websocket.Connection.accept(move stream, request)?
+        return socket.send_text("welcome to {room}")
+    }
+}
+
+app.map_upgrade(r"/ws/{room}", new Chat())?
+```
+
+- **The middleware pipeline runs first**, exactly as it does for a request, so
+  authentication, cookies, an `Origin` check and rate limiting apply to a
+  handshake. A layer that answers instead of calling `next` is the answer, and
+  the socket is never handed over. That matters: `SameSite` does not protect a
+  handshake, so the `Origin` check is the control against cross-site WebSocket
+  hijacking, and an upgrade path that skipped the pipeline would skip it.
+- **Patterns are the ordinary route patterns.** Parameters and a trailing
+  catch-all work and are captured into `request.route_values` before the
+  handler runs. Upgrade endpoints live in their own table, so an ordinary route
+  may share the path — a page and its socket at the same URL is normal — and a
+  plain `GET` never reaches a handler that expects a socket.
+- **`request` is the raw parsed head**, which is what `accept_websocket` needs:
+  the handshake fields, the HTTP version and the method live there and not on
+  `HttpContext.request`.
+- **The socket arrives non-blocking and registered with the fiber netpoller.**
+  `read_into`/`read_into_waiting` park the fiber and leave the worker thread
+  free; a library whose reads go through `TcpStream.read` does not park, so a
+  handler using one calls `set_nonblocking(false)` first and then holds that
+  worker thread for the life of the connection.
+- **Bytes that arrive after the handshake in the same read are a 400.** They
+  belong to the next protocol, this server has already consumed them, and a
+  `TcpStream` cannot carry them across the hand-off — so the handshake is
+  refused rather than a socket handed over whose first frames are missing.
+- **A handler that panics costs one connection.** It runs behind the same fiber
+  shield a request handler does; the panic is recorded server-side and the
+  server keeps accepting. There is no way to answer with a status afterwards,
+  because the socket is gone.
+- Responses framed before the upgrade — a pipelined `GET` in the same read —
+  are pushed to the client before the hand-off. `ServerStats.upgrades` counts
+  the connections that were given away; they produce no `responses` entry,
+  because the `101` is written by the protocol library and not by espresso.
+
+espresso itself imports no protocol library, so a program that registers no
+upgrade endpoint links no WebSocket bridge.
+
 ## Configuration
 
 `espresso.Configuration` layers defaults, files and `--key=value`

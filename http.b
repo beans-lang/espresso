@@ -475,6 +475,11 @@ pub class HttpContext {
     armed: bool = false
     reply: Option<Channel<Completion>> = none
     deferred: bool = false
+    // The upgrade endpoint the pipeline reached, for a request that asked to
+    // switch protocols. It is set by the router's upgrade terminal and read
+    // once by the connection fiber, which then owns the decision; nothing
+    // else in the pipeline may see a half-handed-over connection.
+    upgrade: Option<UpgradeHandler> = none
 
     pub fn init(move request: HttpRequest,
                 services: ServiceProvider) {
@@ -498,6 +503,7 @@ pub class HttpContext {
         self.trace_text = ""
         self.deferred = false
         self.reply = none
+        self.upgrade = none
         return self.request.begin(head)
     }
 
@@ -505,6 +511,19 @@ pub class HttpContext {
     // `respond_later` needs now that the reply channel is per-request.
     fn arm_serving() {
         self.armed = true
+    }
+
+    // The router's upgrade terminal names the endpoint it chose.
+    fn select_upgrade(handler: UpgradeHandler) {
+        self.upgrade = some(handler)
+    }
+
+    // Reads the selection and clears it, so one request hands the socket over
+    // at most once however the connection fiber is written.
+    fn claim_upgrade() -> Option<UpgradeHandler> {
+        let chosen: Option<UpgradeHandler> = self.upgrade
+        self.upgrade = none
+        return chosen
     }
 
     // The connection fiber takes the reply channel to wait on it; taking it
