@@ -21,6 +21,12 @@ extern "C" fn shutdown(fd: int, how: int) -> i32
 // everything else the server does for that request put together.
 const vectored_body_min: int = 16384
 
+// The size a released output queue is reserved back to — the same reserve a
+// connection starts with. A queue that outgrew its bound is replaced by a
+// buffer this size rather than kept, so an idle keep-alive connection holds a
+// kilobyte and not the largest batch it ever framed.
+const output_queue_reserve: int = 1024
+
 /// Bounds for the listener, parser, connections, bodies, and output queues.
 pub class ServerOptions {
     pub host: string = "127.0.0.1"
@@ -40,6 +46,24 @@ pub class ServerOptions {
     pub max_body_bytes: int = 8388608
     pub max_response_body_bytes: int = 16777216
     pub max_pending_output_bytes: int = 33554432
+    /// The most framed response bytes a connection may hold in its output
+    /// queue before it pushes them to the peer.
+    ///
+    /// One read can carry many pipelined requests, and every response in that
+    /// batch is framed before the read loop reaches its flush; without a bound
+    /// the queue grows to the whole batch and keeps that memory for the life of
+    /// the connection, so a client turns a few kilobytes of pipelined requests
+    /// into megabytes of per-connection buffer. Reaching the bound flushes what
+    /// is queued before the next response is framed, which costs one extra
+    /// write per bound-worth of output and changes nothing a client can see:
+    /// the queue only ever ends on a response boundary, so responses keep their
+    /// pipelined order.
+    ///
+    /// The default is one read buffer's worth — 64 KiB, some five hundred small
+    /// responses, so batching survives everywhere it pays — and at four times
+    /// `vectored_body_min` it is also the point past which a batch of bodies too
+    /// small to send beside their heads is worth a write of its own.
+    pub max_queued_output_bytes: int = 65536
     pub max_requests_per_connection: int = 1000000
     pub max_header_count: int = 128
     pub max_header_bytes: int = 65536
@@ -60,6 +84,7 @@ pub class ServerOptions {
            self.read_buffer_bytes <= 0 || self.max_body_bytes <= 0 ||
            self.max_response_body_bytes <= 0 ||
            self.max_pending_output_bytes <= 0 ||
+           self.max_queued_output_bytes <= 0 ||
            self.max_requests_per_connection <= 0 ||
            self.max_header_count <= 0 || self.max_header_bytes <= 0 ||
            self.max_target_bytes <= 0 || self.max_head_span_bytes <= 0 {
@@ -99,6 +124,18 @@ pub class ServerStats {
     /// declared length up front, so their pieces filled one allocation instead
     /// of regrowing it.
     pub request_bodies_presized: int = 0
+    /// The largest an output queue grew before it was pushed to its peer, over
+    /// every connection of this run. It is bounded by `max_queued_output_bytes`
+    /// plus the one response that crossed the bound.
+    pub output_queue_peak: int = 0
+    /// How many times a connection pushed its output queue mid-batch because it
+    /// had reached `max_queued_output_bytes`, rather than at the end of the
+    /// batch it was framing.
+    pub output_queue_flushes: int = 0
+    /// How many times an output queue that had outgrown
+    /// `max_queued_output_bytes` was released after its flush, rather than kept
+    /// for the connection's life.
+    pub output_buffers_released: int = 0
 
     pub fn init() {}
 }
@@ -308,6 +345,9 @@ unique class ServerConnection {
     close_after_write: bool = false
     requests: int = 0
     max_body: int
+    // options.max_queued_output_bytes, held here because every flush consults
+    // it and the flush paths sit below the layer that carries ServerOptions.
+    max_queued_output: int
     // The head most recently adopted by the context. It goes back to the
     // parser for reuse only when the next head has replaced every alias to
     // it — the swap in absorb_event's head arm.
@@ -333,8 +373,9 @@ unique class ServerConnection {
         limits.max_head_span_bytes = options.max_head_span_bytes
         self.parser = http.RequestParser.with_limits(limits)
         self.read_buffer = new Bytes(options.read_buffer_bytes)
-        self.output.reserve(1024)
+        self.output.reserve(output_queue_reserve)
         self.max_body = options.max_body_bytes
+        self.max_queued_output = options.max_queued_output_bytes
     }
 
     fn has_output() -> bool { return self.output.len() > 0 }
@@ -373,7 +414,8 @@ unique class ServerConnection {
     fn append_response_from(response: HttpResponse,
                             keep_alive: bool,
                             head_only: bool,
-                            options: ServerOptions) -> Result<bool> {
+                            options: ServerOptions,
+                            stats: ServerStats) -> Result<bool> {
         // Fast path: a response with only standard headers and a known content
         // type reuses this connection's cached head, framed by copying two
         // spans and patching the Date rather than re-validating the headers and
@@ -395,13 +437,13 @@ unique class ServerConnection {
                         if response.is_text_body() {
                             if body_len >= vectored_body_min {
                                 return self.flush_with_text(
-                                    response.text_payload())
+                                    response.text_payload(), stats)
                             }
                             self.output.append_string(response.text_payload())
                             return ok(true)
                         }
                         if body_len >= vectored_body_min {
-                            return self.flush_with_body(response.body)
+                            return self.flush_with_body(response.body, stats)
                         }
                         self.output.append(response.body)
                         return ok(true)
@@ -413,11 +455,11 @@ unique class ServerConnection {
         if response.is_text_body() {
             return self.append_response_text(
                 response.status, response.reason, response.headers,
-                response.text_payload(), keep_alive, head_only, options)
+                response.text_payload(), keep_alive, head_only, options, stats)
         }
         return self.append_response_bytes(
             response.status, response.reason, response.headers,
-            response.body, keep_alive, head_only, options)
+            response.body, keep_alive, head_only, options, stats)
     }
 
     fn append_response_bytes(status: int,
@@ -426,7 +468,8 @@ unique class ServerConnection {
                              body: Bytes,
                              keep_alive: bool,
                              head_only: bool,
-                             options: ServerOptions) -> Result<bool> {
+                             options: ServerOptions,
+                             stats: ServerStats) -> Result<bool> {
         if body.len() > options.max_response_body_bytes {
             return self.append_error(
                 500, "Internal Server Error",
@@ -458,7 +501,7 @@ unique class ServerConnection {
                 self.output, status, reason, headers, body.len(), alive)?
             if !keep_alive { self.close_after_write = true }
             if forbidden { return ok(true) }
-            return self.flush_with_body(body)
+            return self.flush_with_body(body, stats)
         }
         http.encode_response_append(
             self.output, status, reason, headers, body, alive)?
@@ -476,7 +519,8 @@ unique class ServerConnection {
                             text: string,
                             keep_alive: bool,
                             head_only: bool,
-                            options: ServerOptions) -> Result<bool> {
+                            options: ServerOptions,
+                            stats: ServerStats) -> Result<bool> {
         if text.len() > options.max_response_body_bytes {
             return self.append_error(
                 500, "Internal Server Error",
@@ -497,7 +541,7 @@ unique class ServerConnection {
                 self.output, status, reason, headers, text.len(), alive)?
             if !keep_alive { self.close_after_write = true }
             if forbidden { return ok(true) }
-            return self.flush_with_text(text)
+            return self.flush_with_text(text, stats)
         }
         // Small: frame the head, then append the string's bytes into the output
         // queue — the same wire bytes and the same single copy a Bytes body
@@ -510,6 +554,30 @@ unique class ServerConnection {
         return ok(true)
     }
 
+    // Ends a flush: the queue is empty again, and the buffer that carried it
+    // is kept only while it is no larger than the connection is allowed to
+    // queue.
+    //
+    // `resize(0)` frees no pages, so a queue that outgrew the bound would
+    // otherwise hold that memory for the rest of the connection's life — the
+    // same trap `release_large_body` closes on the request body. The bound
+    // keeps the ordinary connection under it, so an ordinary connection never
+    // reallocates and keeps every bit of the buffer reuse that makes small
+    // pipelined responses cheap; the one that did outgrow it — a batch framed
+    // past the bound, or a single response with an outsized head — pays one
+    // allocation and hands the memory back.
+    fn finish_flush(stats: ServerStats) {
+        let sent: int = self.output.len()
+        if sent > stats.output_queue_peak { stats.output_queue_peak = sent }
+        if sent > self.max_queued_output {
+            self.output = new Bytes(0)
+            self.output.reserve(output_queue_reserve)
+            stats.output_buffers_released += 1
+            return
+        }
+        self.output.resize(0)
+    }
+
     // Sends the queued output and this response's body as one pair, without
     // the body ever entering the queue.
     //
@@ -517,7 +585,7 @@ unique class ServerConnection {
     // so writing the queue and the body together keeps pipelined responses in
     // order by construction: the body cannot overtake what was queued before
     // it, and nothing can be framed behind it until this returns.
-    fn flush_with_body(body: Bytes) -> Result<bool> {
+    fn flush_with_body(body: Bytes, stats: ServerStats) -> Result<bool> {
         var offset: int = 0
         let total: int = self.output.len() + body.len()
         for offset < total {
@@ -532,7 +600,7 @@ unique class ServerConnection {
                 err(problem) => { return err(problem.msg, problem.kind) }
             }
         }
-        self.output.resize(0)
+        self.finish_flush(stats)
         return ok(true)
     }
 
@@ -544,7 +612,7 @@ unique class ServerConnection {
     // 32 of those concurrent copies set, are both gone. The ordering guarantee
     // is flush_with_body's: the queued output goes in front of the body in the
     // same write, so pipelined responses keep their order by construction.
-    fn flush_with_text(text: string) -> Result<bool> {
+    fn flush_with_text(text: string, stats: ServerStats) -> Result<bool> {
         var offset: int = 0
         let total: int = self.output.len() + text.len()
         for offset < total {
@@ -559,7 +627,7 @@ unique class ServerConnection {
                 err(problem) => { return err(problem.msg, problem.kind) }
             }
         }
-        self.output.resize(0)
+        self.finish_flush(stats)
         return ok(true)
     }
 
@@ -611,7 +679,7 @@ unique class ServerConnection {
                             }
                             self.append_response_bytes(
                                 done.status, done.reason, headers, done.body,
-                                keep_alive, head_only, options)?
+                                keep_alive, head_only, options, stats)?
                             stats.responses += 1
                             return ok(true)
                         }
@@ -659,7 +727,7 @@ unique class ServerConnection {
                                     active.response,
                                     active.request.keep_alive,
                                     active.head_only,
-                                    options)
+                                    options, stats)
                             let closed: Result<bool> = active.close()
                             queued?
                             closed?
@@ -731,7 +799,7 @@ unique class ServerConnection {
                             }
                             self.append_response_from(
                                 active.response, false,
-                                active.head_only, options)?
+                                active.head_only, options, stats)?
                             stats.responses += 1
                         }
                     }
@@ -863,12 +931,28 @@ unique class ServerConnection {
                 self.events[position], app, options, stats)?
             if !proceed { return ok(false) }
             if self.close_after_write { return ok(false) }
+            // One read can carry hundreds of pipelined requests, and every
+            // response in the batch is framed here before the read loop
+            // reaches its flush. Without this the queue grows to hold the
+            // whole batch — a client turns 13 KB of pipelined requests into
+            // megabytes of per-connection buffer — so push it once it has
+            // reached what this connection is allowed to hold.
+            //
+            // An event is absorbed whole, so the queue always ends on a
+            // response boundary here: what goes out is complete responses in
+            // the order they were framed, and the next one cannot be framed
+            // until this returns. Ordering is the same guarantee
+            // flush_with_body relies on.
+            if self.output.len() >= self.max_queued_output {
+                stats.output_queue_flushes += 1
+                self.flush(stats)?
+            }
         }
         return ok(true)
     }
 
     // Pushes the whole output queue to the peer, parking on backpressure.
-    fn flush() -> Result<bool> {
+    fn flush(stats: ServerStats) -> Result<bool> {
         var offset: int = 0
         for offset < self.output.len() {
             match self.stream.write_from(self.output, offset) {
@@ -882,7 +966,7 @@ unique class ServerConnection {
                 err(problem) => { return err(problem.msg, problem.kind) }
             }
         }
-        self.output.resize(0)
+        self.finish_flush(stats)
         return ok(true)
     }
 
@@ -947,7 +1031,7 @@ unique class ServerConnection {
                         }
                     }
                     if self.has_output() {
-                        match self.flush() {
+                        match self.flush(stats) {
                             ok(_) => {}
                             err(problem) => { return false }
                         }
@@ -963,7 +1047,7 @@ unique class ServerConnection {
             }
         }
         if self.has_output() {
-            match self.flush() {
+            match self.flush(stats) {
                 ok(_) => {}
                 err(problem) => { return false }
             }

@@ -203,6 +203,13 @@ Darwin's SO_REUSEPORT does not balance — the last socket to bind
 receives every connection — so a shared-port design there runs on
 one core no matter how many workers it starts.
 
+A connection frames pipelined responses into one output queue and sends
+them together, up to `ServerOptions.max_queued_output_bytes` (64 KiB) at a
+time; reaching that bound sends what is queued before the next response is
+framed, so a burst of pipelined requests cannot turn into an unbounded
+per-connection buffer, and a queue that did outgrow the bound hands its
+memory back rather than keeping it for the life of the connection.
+
 `context.respond_later()` hands a move-only `Responder` to any thread
 for deferred responses — return `espresso.detached()` from the handler.
 `espresso.TestHost` runs the full pipeline in memory for tests, and
