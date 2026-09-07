@@ -305,6 +305,53 @@ its frame and leaks what the request held, so a Windows deployment should
 treat a panicking handler as a resource leak until a COFF unwind lands in
 the compiler.
 
+## Streamed responses
+
+The buffered path is the default: a handler returns an `ActionResult`, the
+router executes it, and the server frames one response. `context.begin_stream`
+is the second mode, for a body whose length is not known when the head has to
+go out.
+
+```beans
+fn report(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    let out: espresso.ResponseStream =
+        context.begin_stream(200, "text/html; charset=utf-8")?
+    for row: Row in rows {
+        out.write_text(render(row))?
+    }
+    out.finish()?
+    return espresso.detached()
+}
+```
+
+- The head goes out at `begin_stream`, carrying `Transfer-Encoding: chunked`,
+  the request's `Date`, the application's `Server` header, the content type,
+  and every header the handler added through `context.response.header(...)`
+  **before** the call. Headers added afterwards go nowhere.
+- **The payload is never copied.** A chunk is one vectored write of its size
+  line and the caller's own bytes; the CRLF that closes a chunk rides the
+  front of the next chunk's size line, so a chunk of any size costs exactly
+  one write. Backpressure parks the connection fiber inside that write,
+  through the same loop a buffered flush uses.
+- An empty `write` sends nothing: a zero-length chunk is the terminator, so it
+  can never be a chunk of the body.
+- A handler that returns without calling `finish()` gets the terminator
+  written for it. A handler that returns an **error** after the head has gone
+  out does not: the body is deliberately left unterminated and the connection
+  closes, because a truncated chunked message is how HTTP says a response is
+  broken and there is no status left to change.
+- A `HEAD` request gets the same head and no body at all, so every chunk is
+  dropped and no terminator is written.
+- `begin_stream` refuses a status that cannot carry a body (1xx, 204, 304), a
+  second call on the same request, a request that already armed a `Responder`,
+  and a handler-supplied `Content-Length`, `Transfer-Encoding` or `Connection`
+  — the last three through the same `std.http` gate every framed response
+  passes. A `TestHost` request refuses too, naming the server loop it needs.
+- Responses framed before the stream — pipelined requests in the same read —
+  go out ahead of the streamed head, because the head joins the output queue
+  rather than jumping it. `ServerStats.streamed` counts streamed responses;
+  they are counted in `responses` too.
+
 ## Protocol upgrades
 
 A client that asks to switch protocols — a WebSocket handshake, an `h2c`

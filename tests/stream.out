@@ -1,0 +1,16 @@
+testhost stream: streamed responses need the espresso server loop
+write-after-finish stream
+finish twice true finished true
+stream-after-defer stream
+two-way splits 65 ok-status 65 wrong 0
+n-way splits 16 wrong 0
+big HTTP/1.1 200 OK len 200005 head abc tail |tail
+decorated HTTP/1.1 201 Created custom true cache true type true date true server true body [made]
+unfinished HTTP/1.1 200 OK [half] then HTTP/1.1 200 OK
+broken HTTP/1.1 200 OK [<truncated>] then [<closed with no answer>]
+head-request HTTP/1.1 200 OK chunked true then HTTP/1.1 200 OK [buffered-body]
+pipelined HTTP/1.1 200 OK [buffered-body] then HTTP/1.1 200 OK same-body true
+close-request HTTP/1.1 200 OK closes true body-ok true
+refusals HTTP/1.1 200 OK [204 stream | 304 stream | content-length invalid | second stream [chunks 1 bytes 64]]
+defer HTTP/1.1 200 OK
+requests 93 responses 93 streamed 89

@@ -162,7 +162,8 @@ pub class WebApplication {
 
     /// One reusable per-connection context over the root provider.
     fn new_context(remote: net.Address) -> HttpContext {
-        return new HttpContext(new HttpRequest(remote), self.services)
+        return new HttpContext(
+            new HttpRequest(remote), self.services, self.options.server_header)
     }
 
     /// Resets `context` around a freshly parsed head, stamping a trace
@@ -182,6 +183,17 @@ pub class WebApplication {
         match self.run_pipeline(context, 0) {
             ok(_) => {}
             err(problem) => {
+                // A streamed response has already sent its head, so there is
+                // no status left to change and no body to replace: the
+                // connection truncates what was written and closes. Record it
+                // and hand the failure back rather than rendering a 500 into a
+                // response nobody will read.
+                // The connection records it: every failure that reaches the
+                // shield's join is recorded there, and recording it twice
+                // would put two lines in the log for one request.
+                if context.is_streaming() {
+                    return err(problem.msg, problem.kind)
+                }
                 // A 500 hides its detail from the client behind the generic
                 // message, so it must be recorded server-side first —
                 // otherwise that message's promise of a findable log is a
@@ -194,9 +206,11 @@ pub class WebApplication {
                 self.write_failure(context, problem.msg, problem.kind)?
             }
         }
-        // A deferred request answers through its Responder; the buffered
-        // response object is never sent, so no defaults are stamped on it.
+        // A deferred request answers through its Responder, and a streamed
+        // one has already sent its head; the buffered response object is never
+        // sent in either case, so no defaults are stamped on it.
         if context.deferred { return ok(true) }
+        if context.is_streaming() { return ok(true) }
         if !context.response.completed {
             context.response.no_content()
         }

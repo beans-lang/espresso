@@ -480,12 +480,26 @@ pub class HttpContext {
     // once by the connection fiber, which then owns the decision; nothing
     // else in the pipeline may see a half-handed-over connection.
     upgrade: Option<UpgradeHandler> = none
+    // The socket and the output queue this request will be answered through.
+    // Only the espresso server loop installs one; a TestHost context has
+    // none, which is why begin_stream refuses there and says so.
+    io: Option<ConnectionIo> = none
+    // The writer begin_stream handed to the handler. The connection reads it
+    // back after the handler returns, to terminate the body the handler may
+    // have left open.
+    stream: Option<ResponseStream> = none
+    // The Server header this application sends, if any. A buffered response
+    // gets it stamped after the pipeline; a streamed one has already sent its
+    // head by then, so begin_stream needs the value here.
+    server_header_value: string = ""
 
     pub fn init(move request: HttpRequest,
-                services: ServiceProvider) {
+                services: ServiceProvider,
+                server_header: string = "") {
         self.request = move request
         self.services = services
         self.root_services = services
+        self.server_header_value = server_header
     }
 
     /// A stable id for logs, formatted on first use.
@@ -504,13 +518,92 @@ pub class HttpContext {
         self.deferred = false
         self.reply = none
         self.upgrade = none
+        self.stream = none
         return self.request.begin(head)
     }
 
-    // The connection fiber arms its context once; the flag is all
-    // `respond_later` needs now that the reply channel is per-request.
-    fn arm_serving() {
+    // The connection fiber arms its context once, with the socket and queue
+    // its responses go through. The flag is all `respond_later` needs now that
+    // the reply channel is per-request; the io is what begin_stream needs.
+    fn arm_serving(io: ConnectionIo) {
         self.armed = true
+        self.io = some(io)
+    }
+
+    /// Begins a streamed response: sends the head now, and returns a writer
+    /// that frames each chunk as it is written.
+    ///
+    /// Use it when the body's length is not known when the head must go out.
+    /// The buffered path — return an `ActionResult` and let the router execute
+    /// it — stays the default and is faster for everything that fits in
+    /// memory; this one exists for the response that does not.
+    ///
+    /// The head carries `Transfer-Encoding: chunked`, this request's Date,
+    /// the application's `Server` header if one is configured, `content_type`
+    /// unless the handler already set a Content-Type, and every header the
+    /// handler added through `context.response.header(...)` before this call.
+    /// Headers added afterwards go nowhere: the head is already on the wire.
+    ///
+    /// The handler should call `finish()` when the body is complete. If it
+    /// returns without doing so the connection finishes the body for it. If it
+    /// returns an error instead, the body is deliberately left unterminated
+    /// and the connection closes — a truncated chunked message is how HTTP
+    /// says "this response is broken", and it is the only signal left once the
+    /// head has gone out.
+    pub fn begin_stream(status: int,
+                        content_type: string) -> Result<ResponseStream> {
+        if self.deferred {
+            return err(
+                "this request already armed a Responder; a deferred response is answered through it, not through a stream",
+                "stream")
+        }
+        if self.stream.is_some() {
+            return err("this request already began a streamed response",
+                       "stream")
+        }
+        match self.io {
+            none => {
+                return err(
+                    "streamed responses need the espresso server loop",
+                    "stream")
+            }
+            some(io) => {
+                let headers: http.Headers = self.response.headers
+                if content_type != "" && !headers.has("Content-Type") {
+                    headers.add("Content-Type", content_type)
+                }
+                if !headers.has("Date") {
+                    headers.add("Date", io.http_date())
+                }
+                if self.server_header_value != "" &&
+                   !headers.has("Server") {
+                    headers.add("Server", self.server_header_value)
+                }
+                // The head joins the output queue rather than jumping it, so
+                // responses to requests pipelined in front of this one go out
+                // first — the same ordering rule every other response obeys.
+                write_stream_head(
+                    io.output, status, reason_for(status), headers,
+                    self.request.keep_alive)?
+                io.flush()?
+                let writer: ResponseStream =
+                    new ResponseStream(io, self.head_only)
+                self.stream = some(writer)
+                self.response.completed = true
+                return ok(writer)
+            }
+        }
+    }
+
+    /// True once this request has begun a streamed response.
+    pub fn is_streaming() -> bool { return self.stream.is_some() }
+
+    // The connection reads the writer back after the handler returns, and
+    // clears it so the next request on this connection starts buffered.
+    fn claim_stream() -> Option<ResponseStream> {
+        let writer: Option<ResponseStream> = self.stream
+        self.stream = none
+        return writer
     }
 
     // The router's upgrade terminal names the endpoint it chose.
