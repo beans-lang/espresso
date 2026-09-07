@@ -90,12 +90,18 @@ if [[ ${1:-} == "--native" ]]; then
     done
     assert_panic_stderr "$tmp/panic.native.err" "native"
 
-    # The resident-memory gate: 32 keep-alive connections each served one 1 MiB
+    # The resident-memory gates: 32 keep-alive connections each served one 1 MiB
     # response must hold well under the limit once the response borrows its
     # payload instead of copying it (beans-lang/beans#140). Native only — under
-    # the interpreter the process is the whole compiler. It measures RSS, not
-    # throughput, so a busy box does not flake it.
-    bash "$ROOT/rss_gate.sh"
+    # the interpreter the process is the whole compiler. They measure RSS, not
+    # throughput, so a busy box does not flake them.
+    #
+    # One per payload form. `rss` drives the string path, where all 32 requests
+    # share one payload; `rss_bytes` drives the bytes path, where each request
+    # is answered from its own BytesResult — a form the string gate cannot
+    # speak for, and whose copy therefore sat unmeasured through a green suite.
+    bash "$ROOT/rss_gate.sh" rss
+    bash "$ROOT/rss_gate.sh" rss_bytes
 fi
 
 echo "ok espresso: interpreter, target checks${1:+, native}"
