@@ -11,6 +11,6 @@ broken HTTP/1.1 200 OK [<truncated>] then [<closed with no answer>]
 head-request HTTP/1.1 200 OK chunked true then HTTP/1.1 200 OK [buffered-body]
 pipelined HTTP/1.1 200 OK [buffered-body] then HTTP/1.1 200 OK same-body true
 close-request HTTP/1.1 200 OK closes true body-ok true
-refusals HTTP/1.1 200 OK [204 stream | 304 stream | content-length invalid | second stream [chunks 1 bytes 64]]
+refusals HTTP/1.1 200 OK [204 stream | 304 stream | content-length invalid | transfer-encoding invalid | connection invalid | crlf-header invalid | second stream | empty-text stream | empty-bytes stream [chunks 1 bytes 135]]
 defer HTTP/1.1 200 OK
 requests 93 responses 93 streamed 89

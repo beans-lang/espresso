@@ -26,8 +26,10 @@ fn two_way(context: espresso.HttpContext) ->
     let whole: string = payload()
     let out: espresso.ResponseStream =
         context.begin_stream(200, "text/plain; charset=utf-8")?
-    out.write_text(whole.slice(0, at))?
-    out.write_text(whole.slice(at, whole.len()))?
+    // The ends of the split write nothing rather than an empty chunk: an
+    // empty chunk is the terminator and the writer refuses one.
+    if at > 0 { out.write_text(whole.slice(0, at))? }
+    if at < whole.len() { out.write_text(whole.slice(at, whole.len()))? }
     out.finish()?
     return espresso.detached()
 }
@@ -105,10 +107,30 @@ fn refusals(context: espresso.HttpContext) ->
         ok(_) => { lines.push("304 accepted (wrong)") }
         err(problem) => { lines.push("304 {problem.kind}") }
     }
+    // The three headers this writer owns, refused through the same std.http
+    // gate a framed response passes.
     context.response.header("Content-Length", "5")
     match context.begin_stream(200, "text/plain") {
         ok(_) => { lines.push("content-length accepted (wrong)") }
         err(problem) => { lines.push("content-length {problem.kind}") }
+    }
+    context.response.headers.clear()
+    context.response.header("Transfer-Encoding", "chunked")
+    match context.begin_stream(200, "text/plain") {
+        ok(_) => { lines.push("transfer-encoding accepted (wrong)") }
+        err(problem) => { lines.push("transfer-encoding {problem.kind}") }
+    }
+    context.response.headers.clear()
+    context.response.header("Connection", "close")
+    match context.begin_stream(200, "text/plain") {
+        ok(_) => { lines.push("connection accepted (wrong)") }
+        err(problem) => { lines.push("connection {problem.kind}") }
+    }
+    context.response.headers.clear()
+    context.response.header("X-Split", "a\rb")
+    match context.begin_stream(200, "text/plain") {
+        ok(_) => { lines.push("crlf-header accepted (wrong)") }
+        err(problem) => { lines.push("crlf-header {problem.kind}") }
     }
     context.response.headers.clear()
     let out: espresso.ResponseStream =
@@ -118,10 +140,18 @@ fn refusals(context: espresso.HttpContext) ->
         err(problem) => { lines.push("second {problem.kind}") }
     }
     out.write_text(lines.join(" | "))?
-    // An empty write is not a terminator.
-    out.write_text("")?
-    out.write(new Bytes(0))?
-    out.write_text(" [chunks {out.chunk_count()} bytes {out.byte_count()}]")?
+    // An empty chunk IS the terminator, so writing one is refused rather than
+    // silently truncating the response here.
+    var empties: string = ""
+    match out.write_text("") {
+        ok(_) => { empties = "empty-text accepted (wrong)" }
+        err(problem) => { empties = "empty-text {problem.kind}" }
+    }
+    match out.write(new Bytes(0)) {
+        ok(_) => { empties = "{empties} | empty-bytes accepted (wrong)" }
+        err(problem) => { empties = "{empties} | empty-bytes {problem.kind}" }
+    }
+    out.write_text(" | {empties} [chunks {out.chunk_count()} bytes {out.byte_count()}]")?
     out.finish()?
     match out.write_text("after") {
         ok(_) => { io.println("write after finish accepted (wrong)") }

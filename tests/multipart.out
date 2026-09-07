@@ -1,0 +1,51 @@
+two-fields splits 200 wrong 0
+  head[name=a file=false filename= type= headers=1] body[1] done[1] head[name=b file=false filename= type= headers=1] body[2] done[1] finished[2]
+one-file splits 263 wrong 0
+  head[name=note file=false filename= type= headers=1] body[hello] done[5] head[name=avatar file=true filename=cat.png type=image/png headers=2] body[PNGDATA] done[7] finished[2]
+preamble-epilogue splits 175 wrong 0
+  head[name=a file=false filename= type= headers=1] body[1] done[1] finished[1]
+delimiter-lookalike splits 229 wrong 0
+  head[name=a file=false filename= type= headers=1] body[before------espresso7MA4YWxkTrZu0gWafter<13><10>------espresso7MA4YWxkTrZu0gWX<13><10>------espresso7MA4YWxkTrZu0gWXtail] done[108] finished[1]
+empty-and-crlf splits 215 wrong 0
+  head[name=empty file=false filename= type= headers=1] body[] done[0] head[name=trailing file=false filename= type= headers=1] body[line<13><10>] done[6] finished[2]
+padded-delimiter splits 125 wrong 0
+  head[name=a file=false filename= type= headers=1] body[1] done[1] finished[1]
+bare-close splits 120 wrong 0
+  head[name=a file=false filename= type= headers=1] body[1] done[1] finished[1]
+awkward-filenames splits 407 wrong 0
+  head[name=f file=true filename=a;b.txt type=text/plain headers=2] body[one] done[3] head[name=g file=true filename=say "hi".txt type= headers=1] body[two] done[3] head[name=h file=true filename=café.txt type=text/plain headers=2] body[three] done[5] finished[3]
+many-headers splits 319 wrong 0
+  head[name=a file=true filename=x.bin type=application/octet-stream headers=4] body[DATA] done[4] head[name=plain file=false filename= type= headers=1] body[no type] done[7] finished[2]
+short-boundary splits 96 wrong 0
+  head[name=a file=false filename= type= headers=1] body[--x is not a delimiter here] done[27] finished[1]
+delimiter-prefix-tail splits 137 wrong 0
+  head[name=a file=false filename= type= headers=1] body[tail<13><10>------espr] done[16] finished[1]
+-- refusals --
+truncated bad_request: the multipart body ended before its closing boundary
+no-disposition bad_request: a multipart part carries no Content-Disposition
+no-name bad_request: a multipart part carries no field name
+no-colon bad_request: a multipart part header has no colon
+empty-header-name bad_request: a multipart part header has an empty name
+too-many-parts payload_too_large: the multipart body carries more than 2 parts
+part-too-big payload_too_large: a multipart part exceeds the 4-byte limit
+total-too-big payload_too_large: the multipart body exceeds the 6-byte total limit
+filename-too-long payload_too_large: a submitted filename is longer than 4 bytes
+field-name-too-long payload_too_large: a multipart field name is longer than 2 bytes
+headers-too-big payload_too_large: a multipart part's headers exceed 20 bytes
+too-many-headers payload_too_large: a multipart part carries more than 2 headers
+type-allowed head[name=f file=true filename=a.png type=image/png; charset=binary headers=2] body[P] done[1] finished[1]
+type-refused unsupported_media_type: a file part declares 'application/x-msdownload', which this endpoint does not accept
+type-list-ignores-fields head[name=a file=false filename= type=application/x-msdownload headers=2] body[v] done[1] finished[1]
+-- content types --
+[multipart/form-data; boundary=abc] -> [abc]
+[multipart/form-data; boundary="a b"] -> [a b]
+[MULTIPART/FORM-DATA; BOUNDARY=abc] -> [abc]
+[multipart/form-data] -> bad_request: the multipart Content-Type carries no boundary
+[multipart/form-data; boundary=] -> bad_request: a multipart boundary must be 1 to 70 characters, not 0
+[application/json] -> unsupported_media_type: this endpoint reads a multipart/form-data body, not 'application/json'
+[] -> unsupported_media_type: this endpoint reads a multipart/form-data body, not ''
+[multipart/form-data; boundary=0123456789012345678901234567890123456789012345678901234567890123456789X] -> bad_request: a multipart boundary must be 1 to 70 characters, not 71
+-- read_multipart --
+upload 200 fields 3 title=[A report] tag=[x] tag=[y] | files 2 [field=doc name=report.pdf type=application/pdf size=8 body=PDFBYTES id-ok=true id-is-name=false] [field=doc name=second.pdf type=application/pdf size=4 body=MORE id-ok=true id-is-name=false] | tags x,y first-doc true docs 2
+wrong-type 415 {"status":415,"title":"Unsupported Media Type","detail":"this endpoint reads a multipart/form-data body, not 'application/json'","traceId":"espresso-2"}
+custom-store 200 sinks 2 [bytes=8 sum=316229 state=finished] [bytes=4 sum=372431 state=finished] | records 2 kept-bytes 0 sizes 2

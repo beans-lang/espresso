@@ -232,6 +232,47 @@ answers **415** — a handler that asked for form fields and got JSON was sent
 the wrong thing, and answering with an empty field set would turn that into a
 silent wrong answer.
 
+## Multipart bodies
+
+`espresso.read_multipart(request, limits)` reads a `multipart/form-data` body
+into its scalar fields and its files.
+
+```beans
+let limits: espresso.MultipartLimits = new espresso.MultipartLimits()
+limits.allowed_file_types = ["image/png", "image/jpeg"]
+let form: espresso.MultipartForm =
+    espresso.read_multipart(context.request, limits)?
+match form.file("avatar") {
+    some(picture) => { io.println("{picture.size} bytes") }
+    none => {}
+}
+```
+
+- **The parser is push-based.** `espresso.MultipartParser` takes bytes in any
+  pieces and hands back `PartEvent`s — a head, body pieces, a done, and one
+  `finished`. However the same bytes are cut up, the same parts come out; the
+  suite feeds eleven bodies through every two-way split, one byte at a time,
+  and ten fixed chunk sizes, and requires an identical result each time. It
+  holds at most one delimiter's worth of undecided bytes, so the memory it
+  needs does not grow with the body.
+- **Where a part's bytes go is yours to choose.** `PartStore.open` is called
+  once per part with the part's head and the storage id espresso generated for
+  it, and answers with a `PartSink`. The default keeps parts in memory;
+  a store that writes to disk, hashes, or forwards elsewhere is that one
+  interface. A sink that was opened is always closed — `finish` on success,
+  `discard` on any failure after it.
+- **The submitted filename is metadata, never a path.** Stored bytes are named
+  by `storage_id`, 32 hex characters from `std.random`. There is deliberately
+  no helper that turns a submitted name into a path, because that helper is
+  the bug.
+- **The client's `Content-Type` is never trusted.** `allowed_file_types` can
+  refuse a file part early, but it never authorizes one: nothing decides what a
+  file is from what the client called it.
+- **Limits are the design.** Parts, per-part bytes, total bytes, filename
+  length, field-name length, header-block size, header count. Each one that is
+  crossed comes back naming what was crossed — 413 for a size, 415 for a
+  refused type, 400 for a malformed body.
+
 ## Cookies
 
 `context.request.cookie(name)` reads one cookie; `request.cookies()` is the
@@ -353,8 +394,10 @@ fn report(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
   front of the next chunk's size line, so a chunk of any size costs exactly
   one write. Backpressure parks the connection fiber inside that write,
   through the same loop a buffered flush uses.
-- An empty `write` sends nothing: a zero-length chunk is the terminator, so it
-  can never be a chunk of the body.
+- An empty `write` is **refused**, not skipped: `0\r\n\r\n` is the terminator,
+  so a zero-length chunk written into the middle of a body ends the response
+  there and everything after it is read as trailers — silently, with a 200
+  already on the wire. A caller with nothing to send sends nothing.
 - A handler that returns without calling `finish()` gets the terminator
   written for it. A handler that returns an **error** after the head has gone
   out does not: the body is deliberately left unterminated and the connection

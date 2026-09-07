@@ -157,8 +157,9 @@ pub class ServerStats {
 }
 
 // A byte-substring search: the index in `haystack` where `needle` begins at or
-// after `start`, or -1. Used only when a head-cache entry is built, to locate
-// the two spans that vary between responses.
+// after `start`, or -1. Used when a head-cache entry is built, to locate the
+// two spans that vary between responses, and by the multipart parser, to find
+// the next boundary in what has arrived.
 fn find_bytes(haystack: Bytes, needle: string, start: int) -> int {
     let n: int = haystack.len()
     let m: int = needle.len()

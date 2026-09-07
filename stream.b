@@ -67,13 +67,24 @@ pub class ResponseStream {
         self.scratch.reserve(32)
     }
 
-    /// Sends one chunk. An empty payload writes nothing — a zero-length chunk
-    /// is the terminator, so it can never be a chunk of the body.
+    /// Sends one chunk.
+    ///
+    /// An empty payload is **refused**, not skipped: `0\r\n\r\n` is the
+    /// terminator, so a zero-length chunk written into the middle of a body
+    /// ends the response there and everything after it is read as trailers —
+    /// silently, with a 200 already on the wire. A caller with nothing to send
+    /// must send nothing, and this says so at the call rather than truncating
+    /// the page.
     pub fn write(data: Bytes) -> Result<bool> {
         if self.finished {
             return err("this streamed response is already finished", "stream")
         }
-        if self.head_only || data.len() == 0 { return ok(true) }
+        if data.len() == 0 {
+            return err(
+                "a streamed chunk cannot be empty: a zero-length chunk is the terminator, so writing one would end the response here",
+                "stream")
+        }
+        if self.head_only { return ok(true) }
         self.open_chunk(data.len())
         self.io.push_pair(self.scratch, data)?
         self.chunks += 1
@@ -83,12 +94,18 @@ pub class ResponseStream {
     }
 
     /// The string twin of `write`. The string's own bytes go on the wire; it
-    /// is never staged in a buffer first.
+    /// is never staged in a buffer first, and an empty one is refused for the
+    /// reason `write` gives.
     pub fn write_text(text: string) -> Result<bool> {
         if self.finished {
             return err("this streamed response is already finished", "stream")
         }
-        if self.head_only || text.len() == 0 { return ok(true) }
+        if text.len() == 0 {
+            return err(
+                "a streamed chunk cannot be empty: a zero-length chunk is the terminator, so writing one would end the response here",
+                "stream")
+        }
+        if self.head_only { return ok(true) }
         self.open_chunk(text.len())
         self.io.push_pair_text(self.scratch, text)?
         self.chunks += 1
