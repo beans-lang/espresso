@@ -74,7 +74,16 @@ pub fn security_headers(context: HttpContext,
     return result
 }
 
-fn constant_time_equal(left: string, right: string) -> bool {
+/// Compares two strings in time that does not depend on where they first
+/// differ — the comparison a secret needs, because `==` stops at the first
+/// mismatched byte and leaks the shared prefix's length through timing.
+///
+/// It reads both strings whole, so unequal lengths cost the same as equal
+/// ones, and the length difference itself is folded into the answer. Public
+/// because a session token, an antiforgery token and an API key must all be
+/// compared this way: a second copy of this function somewhere else is how one
+/// of them ends up with an early return.
+pub fn constant_time_equal(left: string, right: string) -> bool {
     let a: Bytes = Bytes.from(left)
     let b: Bytes = Bytes.from(right)
     let count: int = if a.len() > b.len() { a.len() } else { b.len() }

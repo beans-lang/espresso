@@ -163,6 +163,24 @@ Scope discipline is validated: resolving a scoped service from the root
 provider, capturing a scoped service inside a singleton, and dependency
 cycles are all errors, not surprises.
 
+`provider.activate(type)` constructs a type that is **not** registered,
+resolving each of its constructor parameters from that provider. It is
+the mounting primitive a framework built on espresso needs — a page
+component or a handler object gets constructor injection without every
+one of them having to become a service first. The result is boxed;
+downcast it with `as?`.
+
+```beans
+let mounted: reflect.Value = scope.activate(type_of(Dashboard))?
+match mounted as? Dashboard {
+    some(page) => { io.println(page.title()) }
+    none => {}
+}
+```
+
+Every constructor parameter must be borrowed and the initializer must be
+public; both are reported by `activate` itself, naming the parameter.
+
 ## Middleware
 
 A middleware is a function or an object; both share one pipeline in
@@ -177,6 +195,22 @@ app.use_middleware(new espresso.RequestLog(logger))?
 `handle(context, next) -> Result<bool>`. The built-ins cover CORS
 (`espresso.cors`), security headers, API keys (`espresso.api_key`) and
 a whole-app rate limit (`espresso.fixed_window_rate_limit`).
+
+`espresso.security_headers` is **for a JSON API, not for a page**. Its
+`Content-Security-Policy` is `default-src 'none'; frame-ancestors 'none'`,
+which is exactly right for a response nothing loads subresources from,
+and wrong for anything that serves HTML: it blocks every script file,
+stylesheet, image and WebSocket the page would open, and a browser
+reports that as a blank page with console errors rather than as a failed
+request. An application that serves pages ships its own header layer with
+the `script-src`/`connect-src` its pages actually need; espresso will not
+quietly loosen this one.
+
+`espresso.constant_time_equal(left, right)` compares two strings without
+stopping at the first difference — the comparison a session token, an
+antiforgery token or an API key needs, since `==` leaks the length of the
+shared prefix through timing. `espresso.api_key` uses it; so should
+anything else in your application that compares a secret.
 
 ## Logging
 
