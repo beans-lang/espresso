@@ -4,6 +4,51 @@ This file records user-facing changes in each Espresso release.
 
 ## [Unreleased]
 
+### Changed
+
+- **A connection caches its response head instead of rebuilding it each
+  request.** A connection answering the same shape repeatedly (a hot route, a
+  benchmark) now frames the head by reusing a cached copy — keyed by (status,
+  reason, content-type, keep-alive) — writing only the Content-Length digits and
+  patching the Date in place, rather than re-validating the headers and building
+  the head line by line. The cached bytes are std.http's own (the entry is built
+  by calling `encode_response_head_append`), so the wire output is byte-for-byte
+  unchanged; a response with a custom header, no content type, a HEAD, or a
+  body-forbidden status takes the original path. On /json this is ~0.6 µs less
+  user time per request (~19%). (beans-lang/beans#140)
+
+- **A request body no longer grows unboundedly with a connection's lifetime.**
+  The request body is sized to its declared `Content-Length` before its pieces
+  arrive, so assembling a body larger than one read fills one allocation instead
+  of regrowing it; and once a body that outgrew a read has been served, its
+  buffer is released rather than kept for the connection's life (`resize(0)`
+  between requests frees no pages). Without this, a keep-alive connection that
+  once received a large body held that capacity — up to `max_body` — forever, so
+  a client could make every connection retain its maximum by sending one large
+  request each. `ServerStats` now reports `request_buffers_released` and
+  `request_bodies_presized`. (beans-lang/beans#140)
+
+- **The `Server` header is no longer sent by default.** `AppOptions
+  .server_header` now defaults to `""`, so — like Go's `net/http` and Bun —
+  espresso adds no `Server` header unless asked. The 18 bytes it used to frame
+  on every response were 1–2% of the small routes. Set `server_header` to a
+  non-empty value (`"espresso"` restores the old behaviour) to opt back in. No
+  test golden captured the header, so none changed. (beans-lang/beans#140)
+
+- **A response holds the handler's payload by reference, not by copy.** A
+  `string` body (`text`, `json_text`, `html`, and the results that build on
+  them) is kept as the handler's own string; a `Bytes` body is moved in. The
+  server frames the head from the payload's length and either appends a small
+  payload to its output queue or sends a large one beside the head with one
+  vectored write — the payload is never staged in a per-connection buffer that
+  grows to its size and keeps that capacity between requests. For 32 connections
+  each holding a 1 MiB response that removes ~32 MiB of resident memory. The
+  bytes on the wire are byte-for-byte unchanged. As a consequence
+  `HttpResponse.body` now holds only a **bytes-form** payload and is empty for a
+  string response; read the payload in either form with the new
+  `HttpResponse.body_bytes()`, and query the form with `is_text_body()`,
+  `text_payload()` and `body_len()`. (beans-lang/beans#140)
+
 ### Added
 
 - **Responses carry a `Date` header** (RFC 9110 §6.6.1). Every response an

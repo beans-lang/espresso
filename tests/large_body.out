@@ -1,0 +1,14 @@
+/text1m GET status true clen true len true bytes true close true
+/text247k GET status true clen true len true bytes true close true
+/bytes1m GET status true clen true len true bytes true close true
+/thr GET status true clen true len true bytes true close true
+/sub GET status true clen true len true bytes true close true
+/text1m HEAD status true clen true bodyless true
+/text247k HEAD status true clen true bodyless true
+/bytes1m HEAD status true clen true bodyless true
+/thr HEAD status true clen true bodyless true
+/sub HEAD status true clen true bodyless true
+pipe large-small first true second true exact true
+pipe small-large first true second true exact true
+/text1m SLOW len true bytes true
+stopped true
