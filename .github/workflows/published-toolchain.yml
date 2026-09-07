@@ -1,0 +1,85 @@
+# Does this package build for someone who installed Beans the normal way?
+#
+# Every gate in this repo resolves the compiler as $BEANSC, then
+# $BEANS_ROOT/build/beansc, then ../../beans/build/beansc, then PATH. In the
+# workspace layout every developer has, the third one always hits, so test.sh
+# ran against a compiler built from beans main and was green on every machine
+# that had one — and on none of their users'. That is how beans-lang/espresso#9
+# shipped: main called three std entry points that exist in no release, and no
+# gate could see it, because no gate ever used a release.
+#
+# This job removes the tree-built compiler from the picture. It installs the
+# latest published release with the release install script — the same one the
+# beans CI boots from, and the same one the README tells a user to run — and
+# then runs test.sh with nothing pointing at a checkout. If it passes, main is
+# installable. If it fails, main is not, and that is worth a red mark.
+#
+# The floor this answers for is Beans 0.1.40, the release that carries
+# beans-lang/beans#148. It was red for a day between that merge and that
+# release — issue #9 — which is the state this job exists to make visible.
+#
+# The native leg (test.sh --native) is deliberately not here. It runs
+# rss_gate.sh, whose pass mark is a resident-memory threshold; a threshold miss
+# on a shared runner would make this job red for a reason that has nothing to
+# do with installability, which is the one thing it is here to answer. It
+# belongs in a separate job with a limit set from what a runner actually does,
+# not from what a laptop does.
+
+name: published toolchain
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  schedule:
+    # Daily, so a release that moves out from under this package is a red mark
+    # here and not a user's bug report.
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: published-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: install the release, run the suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      # test.sh needs no C toolchain for the interpreter leg or the
+      # cross-target checks, but an installed beansc that decides it wants one
+      # must not fail this job for the wrong reason.
+      - name: Install a C toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm
+
+      # The user's install path, verbatim. No fallback to a checkout, and no
+      # `|| true`: if this cannot install a compiler, the job fails here. A
+      # gate that skips when its input is missing is worse than no gate — it
+      # goes quiet exactly when something has moved.
+      - name: Install the latest published Beans
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/beans-lang/beans/releases/latest/download/beans-install.sh | sh
+          echo "$HOME/.beans/bin" >> "$GITHUB_PATH"
+
+      - name: The compiler under test
+        run: |
+          set -euo pipefail
+          command -v beansc
+          beansc --version
+
+      # BEANS_ROOT and BEANSC are cleared so test.sh's resolution order falls
+      # all the way through to PATH, which is where the installed release is.
+      # A checkout of this repo alone has no ../../beans, but clearing them
+      # says so on purpose rather than by luck.
+      - name: Run the suite
+        env:
+          BEANS_ROOT: ""
+          BEANSC: ""
+        run: ./test.sh
