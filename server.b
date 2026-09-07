@@ -12,6 +12,15 @@ import std.time
 // fiber unregisters before it closes, and both run on the worker thread.
 extern "C" fn shutdown(fd: int, how: int) -> i32
 
+// The body size at which a response stops being copied into the output queue
+// and is sent beside its head instead.
+//
+// Below it, copying is cheaper than the write it would save, and appending
+// keeps pipelined responses batched into one send. Above it, the copy is the
+// dominant cost of the response: a megabyte copied twice is more time than
+// everything else the server does for that request put together.
+const vectored_body_min: int = 16384
+
 /// Bounds for the listener, parser, connections, bodies, and output queues.
 pub class ServerOptions {
     pub host: string = "127.0.0.1"
@@ -83,8 +92,146 @@ pub class ServerStats {
     pub responses: int = 0
     pub connection_errors: int = 0
     pub active_peak: int = 0
+    /// How many times a request body that had outgrown one read was released
+    /// after its response, rather than kept for the connection's life.
+    pub request_buffers_released: int = 0
+    /// How many request bodies larger than one read were sized to their
+    /// declared length up front, so their pieces filled one allocation instead
+    /// of regrowing it.
+    pub request_bodies_presized: int = 0
 
     pub fn init() {}
+}
+
+// A byte-substring search: the index in `haystack` where `needle` begins at or
+// after `start`, or -1. Used only when a head-cache entry is built, to locate
+// the two spans that vary between responses.
+fn find_bytes(haystack: Bytes, needle: string, start: int) -> int {
+    let n: int = haystack.len()
+    let m: int = needle.len()
+    if m == 0 { return start }
+    var i: int = if start < 0 { 0 } else { start }
+    for i + m <= n {
+        var j: int = 0
+        var matched: bool = true
+        for j < m {
+            if haystack.get(i + j) != needle.byte_at(j) {
+                matched = false
+                break
+            }
+            j += 1
+        }
+        if matched { return i }
+        i += 1
+    }
+    return -1
+}
+
+// A per-connection cache of one response head, so a connection answering the
+// same shape repeatedly frames the head by copying two spans and patching the
+// Date, instead of re-validating the headers and rebuilding the head line by
+// line each response.
+//
+// The cached bytes are std.http's own: the entry is built by calling
+// http.encode_response_head_append with a body length of 0, so the head is
+// byte-for-byte what the plain path produces. Only two spans vary between
+// responses of one shape — the Content-Length digits and the 29-byte
+// IMF-fixdate Date value — and both are located once, at build time, by
+// searching the produced bytes. If std.http ever changes its head layout, the
+// entry is rebuilt from std.http and the bytes stay identical by construction;
+// only the two build-time searches would need to still find their substrings,
+// and a miss there simply declines the cache and the plain path frames the
+// response.
+pub class ResponseHeadCache {
+    valid: bool = false
+    key_status: int = 0
+    key_reason: string = ""
+    key_ctype: string = ""
+    key_alive: bool = false
+    // "HTTP/1.1 <status> <reason>\r\nContent-Length: "
+    prefix: Bytes = new Bytes(0)
+    // "\r\n<Connection?><Content-Type><Server?>Date: <29 bytes>\r\n\r\n"
+    suffix: Bytes = new Bytes(0)
+    // Offset of the 29-byte Date value within `suffix`.
+    date_off: int = -1
+    // The wall-second the cached Date bytes are for.
+    stamped_second: int = -1
+
+    pub fn init() {}
+
+    // Appends the framed head for this response to `out`, reusing the cached
+    // entry when the shape matches and rebuilding it when it does not. Returns
+    // false (appending nothing) when the response cannot be cached, so the
+    // caller frames it the plain way. `headers` must be the response's standard
+    // headers (Content-Type, and Server if opted in) with no custom header and
+    // no Date; `date_text` is the current IMF-fixdate and `second` its wall
+    // second.
+    pub fn frame_into(out: Bytes,
+                      status: int, reason: string, content_type: string,
+                      headers: http.Headers, keep_alive: bool, body_len: int,
+                      date_text: string, second: int) -> Result<bool> {
+        if !self.valid || self.key_status != status ||
+           self.key_alive != keep_alive || self.key_ctype != content_type ||
+           self.key_reason != reason {
+            let built: bool = self.build(
+                status, reason, content_type, headers, keep_alive, date_text)?
+            if !built { return ok(false) }
+            self.stamped_second = second
+        }
+        if second != self.stamped_second {
+            self.suffix.copy_from(Bytes.from(date_text), self.date_off)
+            self.stamped_second = second
+        }
+        out.append(self.prefix)
+        out.append_int_text(body_len)
+        out.append(self.suffix)
+        return ok(true)
+    }
+
+    fn build(status: int, reason: string, content_type: string,
+             headers: http.Headers, keep_alive: bool,
+             date_text: string) -> Result<bool> {
+        // Only Content-Type and an optional Server may stand before the Date
+        // this adds; anything else means a non-standard header slipped past the
+        // response's custom flag, so decline rather than cache a wrong head.
+        if headers.count() == 0 || headers.count() > 2 { return ok(false) }
+        if headers.name_at(0) != "Content-Type" { return ok(false) }
+        let temp: http.Headers = new http.Headers()
+        for index: int in 0..headers.count() {
+            temp.add(headers.name_at(index), headers.value_at(index))
+        }
+        temp.add("Date", date_text)
+        let buf: Bytes = new Bytes(0)
+        let forbidden: bool = http.encode_response_head_append(
+            buf, status, reason, temp, 0, keep_alive)?
+        // A body-forbidden status has no Content-Length line to splice.
+        if forbidden { return ok(false) }
+        let cl_at: int = find_bytes(buf, "Content-Length: ", 0)
+        if cl_at < 0 { return ok(false) }
+        // The placeholder length is exactly "0"; a real response's digits are
+        // written in its place and the suffix follows it.
+        let digits_at: int = cl_at + 16
+        if digits_at >= buf.len() || buf.get(digits_at) != 48 { return ok(false) }
+        let suffix_at: int = digits_at + 1
+        let date_label_at: int = find_bytes(buf, "Date: ", suffix_at)
+        if date_label_at < 0 { return ok(false) }
+        let date_val_at: int = date_label_at + 6
+        // A fixed-width IMF-fixdate is 29 bytes and ends in CRLF; patching in
+        // place is only safe if that is exactly what was produced.
+        if date_val_at + 31 > buf.len() { return ok(false) }
+        if buf.get(date_val_at + 29) != 13 || buf.get(date_val_at + 30) != 10 {
+            return ok(false)
+        }
+        self.prefix = buf.slice(0, digits_at)
+        self.suffix = buf.slice(suffix_at, buf.len())
+        self.date_off = date_val_at - suffix_at
+        self.valid = true
+        self.key_status = status
+        self.key_reason = reason
+        self.key_ctype = content_type
+        self.key_alive = keep_alive
+        return ok(true)
+    }
 }
 
 // Live connection descriptors, for the graceful sweep only. Every touch
@@ -170,6 +317,9 @@ unique class ServerConnection {
     // no lock and never crosses a thread.
     date_text: string = ""
     date_second: int = -1
+    // Caches this connection's last response head so a repeated shape is framed
+    // by copying two spans and patching the Date — see ResponseHeadCache.
+    head_cache: ResponseHeadCache = new ResponseHeadCache()
 
     fn init(move stream: net.TcpStream,
             peer: net.Address,
@@ -216,13 +366,67 @@ unique class ServerConnection {
         return self.date_text
     }
 
-    fn append_response(status: int,
-                       reason: string,
-                       headers: http.Headers,
-                       body: Bytes,
-                       keep_alive: bool,
-                       head_only: bool,
-                       options: ServerOptions) -> Result<bool> {
+    // Frames a finished response, in whichever form it carries its payload.
+    // Neither form copies the payload into a per-connection buffer: a small one
+    // is appended to the output queue (which keeps pipelined responses batched),
+    // a large one is sent beside its head with one vectored write.
+    fn append_response_from(response: HttpResponse,
+                            keep_alive: bool,
+                            head_only: bool,
+                            options: ServerOptions) -> Result<bool> {
+        // Fast path: a response with only standard headers and a known content
+        // type reuses this connection's cached head, framed by copying two
+        // spans and patching the Date rather than re-validating the headers and
+        // rebuilding the head. HEAD, custom-header, no-content-type, and
+        // over-limit responses fall through to the plain path unchanged.
+        if !head_only && !response.has_custom_header() &&
+           response.content_type() != "" &&
+           response.body_len() <= options.max_response_body_bytes {
+            let alive: bool = keep_alive && !self.close_after_write
+            let body_len: int = response.body_len()
+            let date: string = self.http_date()
+            match self.head_cache.frame_into(
+                    self.output, response.status, response.reason,
+                    response.content_type(), response.headers, alive, body_len,
+                    date, self.date_second) {
+                ok(cached) => {
+                    if cached {
+                        if !keep_alive { self.close_after_write = true }
+                        if response.is_text_body() {
+                            if body_len >= vectored_body_min {
+                                return self.flush_with_text(
+                                    response.text_payload())
+                            }
+                            self.output.append_string(response.text_payload())
+                            return ok(true)
+                        }
+                        if body_len >= vectored_body_min {
+                            return self.flush_with_body(response.body)
+                        }
+                        self.output.append(response.body)
+                        return ok(true)
+                    }
+                }
+                err(problem) => { return err(problem.msg, problem.kind) }
+            }
+        }
+        if response.is_text_body() {
+            return self.append_response_text(
+                response.status, response.reason, response.headers,
+                response.text_payload(), keep_alive, head_only, options)
+        }
+        return self.append_response_bytes(
+            response.status, response.reason, response.headers,
+            response.body, keep_alive, head_only, options)
+    }
+
+    fn append_response_bytes(status: int,
+                             reason: string,
+                             headers: http.Headers,
+                             body: Bytes,
+                             keep_alive: bool,
+                             head_only: bool,
+                             options: ServerOptions) -> Result<bool> {
         if body.len() > options.max_response_body_bytes {
             return self.append_error(
                 500, "Internal Server Error",
@@ -233,14 +437,129 @@ unique class ServerConnection {
         if !headers.has("Date") {
             headers.add("Date", self.http_date())
         }
-        let start: int = self.output.len()
-        http.encode_response_append(
-            self.output, status, reason, headers, body,
-            keep_alive && !self.close_after_write)?
-        if head_only && body.len() <= self.output.len() - start {
-            self.output.resize(self.output.len() - body.len())
+        let alive: bool = keep_alive && !self.close_after_write
+        // A HEAD response is the head. Framing the whole response and then
+        // cutting the body off the end copied every byte of it first — a
+        // megabyte, on the static route — to reach a buffer it was about to
+        // be removed from.
+        if head_only {
+            http.encode_response_head_append(
+                self.output, status, reason, headers, body.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            return ok(true)
         }
+        // Past this size, copying the body into the output queue costs more
+        // than the extra write that avoids it: a 16 KB copy is around half a
+        // microsecond and a send is one or two, and the gap only widens with
+        // the body. Below it, appending keeps pipelined responses batched
+        // into a single write, which is worth more than the copy costs.
+        if body.len() >= vectored_body_min {
+            let forbidden: bool = http.encode_response_head_append(
+                self.output, status, reason, headers, body.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            if forbidden { return ok(true) }
+            return self.flush_with_body(body)
+        }
+        http.encode_response_append(
+            self.output, status, reason, headers, body, alive)?
         if !keep_alive { self.close_after_write = true }
+        return ok(true)
+    }
+
+    // The string-body twin of append_response_bytes. The payload is the
+    // handler's own string, framed from its length; it is never staged in a
+    // response buffer. Below the threshold its bytes are appended straight to
+    // the output queue, above it it is sent beside the head (flush_with_text).
+    fn append_response_text(status: int,
+                            reason: string,
+                            headers: http.Headers,
+                            text: string,
+                            keep_alive: bool,
+                            head_only: bool,
+                            options: ServerOptions) -> Result<bool> {
+        if text.len() > options.max_response_body_bytes {
+            return self.append_error(
+                500, "Internal Server Error",
+                "response body exceeds the configured limit", false, options)
+        }
+        if !headers.has("Date") {
+            headers.add("Date", self.http_date())
+        }
+        let alive: bool = keep_alive && !self.close_after_write
+        if head_only {
+            http.encode_response_head_append(
+                self.output, status, reason, headers, text.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            return ok(true)
+        }
+        if text.len() >= vectored_body_min {
+            let forbidden: bool = http.encode_response_head_append(
+                self.output, status, reason, headers, text.len(), alive)?
+            if !keep_alive { self.close_after_write = true }
+            if forbidden { return ok(true) }
+            return self.flush_with_text(text)
+        }
+        // Small: frame the head, then append the string's bytes into the output
+        // queue — the same wire bytes and the same single copy a Bytes body
+        // takes through encode_response_append, but read from the handler's
+        // string so nothing is staged in a response buffer first.
+        let forbidden: bool = http.encode_response_head_append(
+            self.output, status, reason, headers, text.len(), alive)?
+        if !forbidden { self.output.append_string(text) }
+        if !keep_alive { self.close_after_write = true }
+        return ok(true)
+    }
+
+    // Sends the queued output and this response's body as one pair, without
+    // the body ever entering the queue.
+    //
+    // Anything already queued is in front of the head this call just framed,
+    // so writing the queue and the body together keeps pipelined responses in
+    // order by construction: the body cannot overtake what was queued before
+    // it, and nothing can be framed behind it until this returns.
+    fn flush_with_body(body: Bytes) -> Result<bool> {
+        var offset: int = 0
+        let total: int = self.output.len() + body.len()
+        for offset < total {
+            match self.stream.write_vectored(self.output, body, offset) {
+                ok(count) => {
+                    if count <= 0 {
+                        return err("the connection accepted no output",
+                                   "reset")
+                    }
+                    offset += count
+                }
+                err(problem) => { return err(problem.msg, problem.kind) }
+            }
+        }
+        self.output.resize(0)
+        return ok(true)
+    }
+
+    // The string twin of flush_with_body: sends the queued output and this
+    // response's string body as one pair, without the string ever entering a
+    // buffer. write_vectored_text takes the string's bytes directly, so a large
+    // text body is neither copied into a response buffer nor staged in a
+    // per-send one — the copy the old path made, and the allocator high-water
+    // 32 of those concurrent copies set, are both gone. The ordering guarantee
+    // is flush_with_body's: the queued output goes in front of the body in the
+    // same write, so pipelined responses keep their order by construction.
+    fn flush_with_text(text: string) -> Result<bool> {
+        var offset: int = 0
+        let total: int = self.output.len() + text.len()
+        for offset < total {
+            match self.stream.write_vectored_text(self.output, text, offset) {
+                ok(count) => {
+                    if count <= 0 {
+                        return err("the connection accepted no output",
+                                   "reset")
+                    }
+                    offset += count
+                }
+                err(problem) => { return err(problem.msg, problem.kind) }
+            }
+        }
+        self.output.resize(0)
         return ok(true)
     }
 
@@ -290,7 +609,7 @@ unique class ServerConnection {
                                !headers.has("Server") {
                                 headers.add("Server", app.server_header())
                             }
-                            self.append_response(
+                            self.append_response_bytes(
                                 done.status, done.reason, headers, done.body,
                                 keep_alive, head_only, options)?
                             stats.responses += 1
@@ -335,14 +654,12 @@ unique class ServerConnection {
                             self.await_completion(
                                 active, app, options, stats)?
                         } else {
-                            let queued: Result<bool> = self.append_response(
-                                active.response.status,
-                                active.response.reason,
-                                active.response.headers,
-                                active.response.body,
-                                active.request.keep_alive,
-                                active.head_only,
-                                options)
+                            let queued: Result<bool> =
+                                self.append_response_from(
+                                    active.response,
+                                    active.request.keep_alive,
+                                    active.head_only,
+                                    options)
                             let closed: Result<bool> = active.close()
                             queued?
                             closed?
@@ -412,12 +729,9 @@ unique class ServerConnection {
                                 active.response.header(
                                     "Server", app.server_header())
                             }
-                            self.append_response(
-                                active.response.status,
-                                active.response.reason,
-                                active.response.headers,
-                                active.response.body,
-                                false, active.head_only, options)?
+                            self.append_response_from(
+                                active.response, false,
+                                active.head_only, options)?
                             stats.responses += 1
                         }
                     }
@@ -448,6 +762,23 @@ unique class ServerConnection {
                     some(active) => {
                         match app.begin_request(active, request) {
                             ok(_) => {
+                                // Reserve the body to its declared length so
+                                // the pieces that follow fill one allocation
+                                // instead of regrowing it — a 101 KB body
+                                // arriving through a 64 KB read buffer regrows
+                                // once per request otherwise. Bounded by
+                                // max_body, which the body loop enforces
+                                // anyway, so a lying Content-Length can never
+                                // reserve more than a real body could; a
+                                // chunked or bodyless message declares -1 and
+                                // reserves nothing.
+                                let declared: int = request.content_length
+                                if declared > 0 && declared <= self.max_body {
+                                    active.request.body.reserve(declared)
+                                    if declared > options.read_buffer_bytes {
+                                        stats.request_bodies_presized += 1
+                                    }
+                                }
                                 // begin_request replaced the context's view
                                 // of the previous head, so its shell can go
                                 // back to the parser for the next message.
@@ -500,6 +831,18 @@ unique class ServerConnection {
             done(keep_alive) => {
                 self.have_head = false
                 self.dispatch(app, keep_alive, options, stats)?
+                // The response is sent; a body buffer that outgrew one read is
+                // no longer needed and must not be carried for the life of the
+                // connection.
+                match self.context {
+                    some(active) => {
+                        if active.request.release_large_body(
+                                options.read_buffer_bytes) {
+                            stats.request_buffers_released += 1
+                        }
+                    }
+                    none => {}
+                }
             }
             upgraded(request, remainder) => {
                 self.append_error(

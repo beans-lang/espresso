@@ -46,7 +46,7 @@ fn show(app: espresso.WebApplication,
     let context: espresso.HttpContext = app.handle(
         served(method, target, body),
         new net.Address("127.0.0.1", 1234))?
-    io.println("{method} {target} -> {context.response.status} [{context.response.body.to_string()}]")
+    io.println("{method} {target} -> {context.response.status} [{context.response.body_bytes().to_string()}]")
     io.println("middleware {context.response.headers.has("X-Before") && context.response.headers.has("X-After")}")
     context.close()?
     return ok(true)

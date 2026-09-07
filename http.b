@@ -210,6 +210,22 @@ pub unique class HttpRequest {
         return ok(true)
     }
 
+    // Releases a body buffer that grew past `threshold`, so a connection that
+    // served one message larger than a single read does not keep that capacity
+    // for the rest of its life — resize(0) between requests frees no pages, so
+    // without this a keep-alive connection holds its largest body forever. A
+    // body at or below the threshold is left alone, so a steady small-request
+    // connection never reallocates; a steady large-request one pays one buffer
+    // per request, which its next reserve (from Content-Length) fills without
+    // regrowing.
+    fn release_large_body(threshold: int) -> bool {
+        if self.body.len() > threshold {
+            self.body = new Bytes(0)
+            return true
+        }
+        return false
+    }
+
     /// True when `path` needs no percent-decoding to compare literally.
     fn plain_path() -> bool { return self.path_plain }
 
@@ -255,11 +271,33 @@ pub unique class HttpRequest {
 }
 
 /// A buffered HTTP response. The server owns Content-Length and Connection.
+///
+/// The response holds the handler's payload by reference, not by copy: a
+/// `string` body is kept as the handler's own string (`body_text`) and a
+/// `Bytes` body is moved in (`body`). The server frames the head from the
+/// payload's length and either appends a small payload to its output queue or
+/// sends a large one beside the head with one vectored write — the payload
+/// never grows a per-connection buffer, which is what kept a megabyte alive on
+/// every connection before (see beans-lang/beans#140).
+///
+/// `body` is the bytes-form payload and is empty when the payload is a string;
+/// `body_bytes()` returns the payload as bytes regardless of form.
 pub unique class HttpResponse {
     pub status: int = 200
     pub reason: string = "OK"
     pub headers: http.Headers = new http.Headers()
     pub body: Bytes = new Bytes(0)
+    // The string-form payload, referenced (not copied) from the handler's own
+    // string. Empty when the payload is a Bytes.
+    body_text: string = ""
+    // Which form carries the payload this response.
+    body_is_text: bool = false
+    // The body's content type, kept for the head cache's key so it need not be
+    // scanned out of the header block each response.
+    content_type_value: string = ""
+    // True once a handler adds a header of its own through header(); such a
+    // response has non-standard headers and is never framed from a cached head.
+    has_custom: bool = false
     pub completed: bool = false
 
     pub fn init() {}
@@ -268,34 +306,52 @@ pub unique class HttpResponse {
         self.status = 200
         self.reason = "OK"
         if self.headers.count() != 0 { self.headers.clear() }
-        self.body.resize(0)
+        // Drop both forms' payloads. A string reference costs nothing to drop;
+        // a bytes payload is released outright rather than kept as capacity —
+        // resize(0) would leave a megabyte of it resident on an idle
+        // connection, which is the retention this class exists to avoid. A
+        // response that carried no bytes payload keeps its empty buffer, so the
+        // common text path allocates nothing here.
+        self.body_text = ""
+        if self.body.len() != 0 { self.body = new Bytes(0) }
+        self.body_is_text = false
+        self.content_type_value = ""
+        self.has_custom = false
         self.completed = false
     }
 
     pub fn header(name: string, value: string) {
         self.headers.add(name, value)
+        self.has_custom = true
     }
 
+    /// Finishes the response with a `Bytes` body, moved in without a copy.
     pub fn bytes(status: int, reason: string,
                  move body: Bytes,
                  content_type: string = "application/octet-stream") {
         self.status = status
         self.reason = reason
         self.body = move body
+        self.body_text = ""
+        self.body_is_text = false
+        self.content_type_value = content_type
         if content_type != "" && !self.headers.has("Content-Type") {
             self.headers.add("Content-Type", content_type)
         }
         self.completed = true
     }
 
-    /// Copies `body` into the reused response buffer — the allocation-free
-    /// way to finish a response.
+    /// Finishes the response with a `string` body, held by reference — no copy
+    /// into a response buffer, so a large body never becomes a per-connection
+    /// allocation.
     pub fn text_body(status: int, reason: string,
                      body: string, content_type: string) {
         self.status = status
         self.reason = reason
-        self.body.resize(0)
-        self.body.append_string(body)
+        self.body_text = body
+        self.body_is_text = true
+        if self.body.len() != 0 { self.body = new Bytes(0) }
+        self.content_type_value = content_type
         if content_type != "" && !self.headers.has("Content-Type") {
             self.headers.add("Content-Type", content_type)
         }
@@ -309,8 +365,45 @@ pub unique class HttpResponse {
     pub fn no_content() {
         self.status = 204
         self.reason = "No Content"
-        self.body.resize(0)
+        self.body_text = ""
+        if self.body.len() != 0 { self.body = new Bytes(0) }
+        self.body_is_text = false
         self.completed = true
+    }
+
+    /// True when the payload is a string (`body` is then empty).
+    pub fn is_text_body() -> bool { return self.body_is_text }
+
+    /// The body's content type, as set by `text`/`bytes`/the results.
+    pub fn content_type() -> string { return self.content_type_value }
+
+    /// True when a handler added a header of its own; the head cache is bypassed
+    /// for such a response.
+    pub fn has_custom_header() -> bool { return self.has_custom }
+
+    /// The string-form payload, or "" for a bytes body. A cheap reference.
+    pub fn text_payload() -> string { return self.body_text }
+
+    /// The payload's length in bytes, in either form.
+    pub fn body_len() -> int {
+        return if self.body_is_text {
+            self.body_text.len()
+        } else {
+            self.body.len()
+        }
+    }
+
+    /// The payload materialised as a fresh `Bytes`, whichever form it is in.
+    /// For inspecting a finished response (the in-memory test host); not on the
+    /// server's send path, which never materialises a string payload.
+    pub fn body_bytes() -> Bytes {
+        if self.body_is_text {
+            let out: Bytes = new Bytes(0)
+            out.reserve(self.body_text.len())
+            out.append_string(self.body_text)
+            return move out
+        }
+        return self.body.slice(0, self.body.len())
     }
 }
 

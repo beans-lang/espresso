@@ -8,7 +8,11 @@ import std.net
 /// Safe production defaults. Development may opt into detailed errors.
 pub class AppOptions {
     pub detailed_errors: bool = false
-    pub server_header: string = "espresso"
+    /// The `Server` header value, sent on every response. Empty by default —
+    /// like Go's net/http and Bun, espresso identifies itself in no header
+    /// unless asked to. Set it to a non-empty value (e.g. "espresso") to opt
+    /// back in; those bytes are then framed on every response.
+    pub server_header: string = ""
     /// Where a failed request's server-side record goes. `none` (the default)
     /// writes it to stderr — no logger to name, no shared state to race, one
     /// line per failure, and it never touches a program's stdout. Set a
@@ -166,7 +170,10 @@ pub class WebApplication {
         }
         if self.options.server_header != "" &&
            !context.response.headers.has("Server") {
-            context.response.header("Server", self.options.server_header)
+            // A framework header, not a handler's: add it straight so it does
+            // not mark the response as carrying a custom header (the head cache
+            // includes Server and stays usable when it is opted in).
+            context.response.headers.add("Server", self.options.server_header)
         }
         return ok(true)
     }

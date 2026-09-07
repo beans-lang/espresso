@@ -2,3 +2,4 @@ build/
 .DS_Store
 node_modules/
 examples/json_bench/
+examples/bench3/

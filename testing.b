@@ -15,8 +15,7 @@ pub class TestResponse {
         self.status = context.response.status
         self.reason = context.response.reason
         self.headers = context.response.headers
-        self.body = context.response.body.slice(
-            0, context.response.body.len())
+        self.body = context.response.body_bytes()
         self.trace_id = context.trace_id()
     }
 
