@@ -6,6 +6,25 @@ This file records user-facing changes in each Espresso release.
 
 ### Changed
 
+- **`BytesResult` hands its payload to the response instead of copying it, and
+  answers one request.** `BytesResult.execute` passed
+  `self.body.slice(0, self.body.len())` — a full duplicate of the payload on
+  every response, and the last body copy left after the borrowed-body work.
+  The payload is now moved into the response, so a megabyte body never exists
+  twice: an application holding 32 prepared 1 MiB responses and serving them to
+  32 held connections peaks at ~40 MB of resident memory instead of ~72 MB.
+  Handing the payload over makes a `BytesResult` **single-use**, the same
+  one-shot contract `Responder` keeps — a second `execute` returns an error
+  naming the mistake rather than silently sending an empty body. Build one per
+  request; a payload served to many requests belongs in `text`, `json_text` or
+  `html`, whose `string` is already shared without a copy. The bytes on the
+  wire are unchanged. (#5)
+
+- **A validation problem document is sent as the string it already is.**
+  `write_validation_problem` copied its rendered problem+json into a `Bytes`
+  before handing it to the response; it now goes over by reference, the way
+  `ProblemResult` frames the identical document. Wire-identical. (#5)
+
 - **A connection caches its response head instead of rebuilding it each
   request.** A connection answering the same shape repeatedly (a hot route, a
   benchmark) now frames the head by reusing a cached copy — keyed by (status,

@@ -2,3 +2,6 @@ text: istext true raw 0 payload 20000 match true
 bytes: istext false raw 20000 payload 20000 match true
 switch: istext true raw 0 payload 5
 nocontent: istext false raw 0 payload 0
+validation: istext true raw 0 payload 140
+bytesresult: istext false raw 20000 match true
+bytesresult again: ok false

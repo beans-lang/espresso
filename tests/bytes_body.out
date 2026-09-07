@@ -1,0 +1,16 @@
+/b0 GET status true type true clen true len true bytes true
+/b1 GET status true type true clen true len true bytes true
+/b7 GET status true type true clen true len true bytes true
+/b16383 GET status true type true clen true len true bytes true
+/b16384 GET status true type true clen true len true bytes true
+/b1m GET status true type true clen true len true bytes true
+/bin GET status true clen true bytes true
+/b0 HEAD status true clen true bodyless true
+/b1 HEAD status true clen true bodyless true
+/b7 HEAD status true clen true bodyless true
+/b16383 HEAD status true clen true bodyless true
+/b16384 HEAD status true clen true bodyless true
+/b1m HEAD status true clen true bodyless true
+/bin HEAD status true clen true bodyless true
+/once ONCE first true second true named true not-empty-200 true
+stopped true

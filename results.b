@@ -125,21 +125,44 @@ pub class DetachedResult implements ActionResult {
 }
 
 /// Bytes with an explicit content type.
+///
+/// The payload is **handed over**, not copied. `init` takes it by `move` and
+/// `execute` moves it on into the response, so a megabyte body reaches the
+/// socket without ever being duplicated — the last copy issue #5 named.
+///
+/// That makes a BytesResult single-use: one result answers one request. A
+/// second `execute` has no payload left and says so rather than sending an
+/// empty body, the same one-shot contract `Responder` keeps. Build one per
+/// request; a payload served repeatedly belongs in `text`/`html`, whose
+/// `string` is immutable and therefore safe to share.
 pub class BytesResult implements ActionResult {
     status: int
-    body: Bytes
+    // The payload, parked in a one-slot list rather than held in a plain
+    // field. A field of a move-only type cannot be moved out — the language
+    // says so and names the way around it: "field and index moves need
+    // consuming accessors such as List `remove`" (beans spec/SYNTAX.md).
+    // `remove` hands the element's handle out and leaves the slot empty, with
+    // no copy of the bytes behind it; a plain field left `execute` no way to
+    // give the payload away except `slice`, a full copy of every response.
+    slot: List<Bytes> = []
     content_type: string
 
     pub fn init(status: int, move body: Bytes, content_type: string) {
         self.status = status
-        self.body = move body
+        self.slot.push(move body)
         self.content_type = content_type
     }
 
     pub fn execute(context: HttpContext) -> Result<bool> {
+        if self.slot.len() == 0 {
+            return err(
+                "this BytesResult already handed its body to a response; a BytesResult answers one request, so build one per request",
+                "result")
+        }
+        let body: Bytes = self.slot.remove(0)
         context.response.bytes(
-            self.status, reason_for(self.status),
-            self.body.slice(0, self.body.len()), self.content_type)
+            self.status, reason_for(self.status), move body,
+            self.content_type)
         return ok(true)
     }
 }
