@@ -61,6 +61,13 @@ free constructors for handlers that are not controller methods:
 `espresso.text(...)`, `espresso.json_text(...)`, `espresso.status(...)`,
 `espresso.problem(...)`, `espresso.view(...)`, `espresso.detached()`.
 
+`BytesResult` is the one result that answers a single request. It takes its
+payload by `move` and hands it to the response rather than copying it, so the
+payload is gone once the result has run; build one per request. A payload
+served to many requests belongs in `text`, `json_text` or `html`, whose
+`string` is shared without a copy. Running one twice returns an error saying
+so — it never sends an empty body.
+
 ## Model binding
 
 Action parameters bind by annotation, compiled once at map time into
