@@ -73,8 +73,14 @@ pub fn write_validation_problem(context: HttpContext,
         items.push(item)?
     }
     problem.add("errors", items)?
-    context.response.bytes(
-        400, "Bad Request", Bytes.from(json.stringify(problem)?),
+    // The problem document goes over as the string json.stringify just built.
+    // Bytes.from(...) copied it into a buffer for no reason: `bytes` wants a
+    // payload it can own, and this one is already owned by nobody else, so the
+    // copy bought nothing. text_body holds the string by reference, which is
+    // also what ProblemResult does with the identical document — the two paths
+    // now frame the same body the same way.
+    context.response.text_body(
+        400, "Bad Request", json.stringify(problem)?,
         "application/problem+json; charset=utf-8")
     return ok(true)
 }
