@@ -55,7 +55,26 @@ fn hex_value(byte: int) -> int {
     return -1
 }
 
-fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
+// Percent-decodes one component.
+//
+// `in_body` says whether this component came out of a request body rather
+// than the request target, and it decides two things.
+//
+// Control bytes: in a target one is an attack surface and never legitimate,
+// so every one is refused. In a form body they are ordinary data — a
+// `<textarea>` posts its newlines as `%0D%0A`, and refusing those would break
+// every multi-line field on the web. NUL stays refused in both, because
+// nothing legitimate posts one and it is a terminator to half the software
+// downstream. What a value carries is then refused at the boundaries it could
+// forge — a header value, a Set-Cookie — which is where the grammar that
+// could be broken actually lives.
+//
+// And the noun in the refusal, so a message about a form field does not say
+// "request target".
+fn decode_url_component(text: string,
+                        plus_as_space: bool,
+                        in_body: bool = false) -> Result<string> {
+    let subject: string = if in_body { "form field" } else { "request target" }
     var needs_decode: bool = false
     var checked: int = 0
     for checked < text.len() {
@@ -63,7 +82,10 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
         if byte == 37 || (plus_as_space && byte == 43) {
             needs_decode = true
         }
-        if byte == 0 || byte < 32 || byte == 127 {
+        if byte == 0 {
+            return err("a {subject} contains a NUL byte", "bad_request")
+        }
+        if !in_body && (byte < 32 || byte == 127) {
             return err("request target contains a control byte", "bad_request")
         }
         checked += 1
@@ -77,15 +99,18 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
         let byte: int = text.byte_at(index)
         if byte == 37 {
             if index + 2 >= text.len() {
-                return err("incomplete percent escape in request target", "bad_request")
+                return err("incomplete percent escape in {subject}", "bad_request")
             }
             let high: int = hex_value(text.byte_at(index + 1))
             let low: int = hex_value(text.byte_at(index + 2))
             if high < 0 || low < 0 {
-                return err("invalid percent escape in request target", "bad_request")
+                return err("invalid percent escape in {subject}", "bad_request")
             }
             let decoded: int = high * 16 + low
-            if decoded == 0 || decoded < 32 || decoded == 127 {
+            if decoded == 0 {
+                return err("a {subject} contains a NUL byte", "bad_request")
+            }
+            if !in_body && (decoded < 32 || decoded == 127) {
                 return err("request target contains a control byte", "bad_request")
             }
             target.push(decoded)
@@ -102,7 +127,13 @@ fn decode_url_component(text: string, plus_as_space: bool) -> Result<string> {
     return ok(target.to_string())
 }
 
-fn parse_query_into(text: string, result: QueryValues) -> Result<bool> {
+// The one `name=value&…` parser. The query string and an
+// application/x-www-form-urlencoded body are the same grammar — that is what
+// the media type's name says — so they share it, and a field that decodes one
+// way in a URL decodes the same way in a body.
+fn parse_query_into(text: string,
+                    result: QueryValues,
+                    in_body: bool = false) -> Result<bool> {
     result.clear()
     if text == "" { return ok(true) }
     for pair: string in text.split("&") {
@@ -116,10 +147,22 @@ fn parse_query_into(text: string, result: QueryValues) -> Result<bool> {
             none => {}
         }
         result.add(
-            decode_url_component(name, true)?,
-            decode_url_component(value, true)?)
+            decode_url_component(name, true, in_body)?,
+            decode_url_component(value, true, in_body)?)
     }
     return ok(true)
+}
+
+/// True when `content_type` names `media`, whatever parameters follow it.
+/// `application/x-www-form-urlencoded; charset=UTF-8` is that media type, and
+/// the comparison is case-insensitive because the grammar says so.
+pub fn media_type_is(content_type: string, media: string) -> bool {
+    var head: string = content_type
+    match content_type.find(";") {
+        some(at) => { head = content_type.slice(0, at) }
+        none => {}
+    }
+    return head.trim().to_lower() == media.to_lower()
 }
 
 fn split_path_into(raw_path: string, segments: List<string>) -> Result<bool> {
@@ -172,6 +215,8 @@ pub unique class HttpRequest {
     query_ready: bool = false
     cookie_cache: QueryValues = new QueryValues()
     cookies_ready: bool = false
+    form_cache: QueryValues = new QueryValues()
+    form_ready: bool = false
 
     fn init(remote: net.Address) {
         self.remote = remote
@@ -192,6 +237,7 @@ pub unique class HttpRequest {
         self.segments_ready = false
         self.query_ready = false
         self.cookies_ready = false
+        self.form_ready = false
         if head.target == "" || head.target.byte_at(0) != 47 {
             return err("the request target must use origin form", "bad_request")
         }
@@ -276,6 +322,35 @@ pub unique class HttpRequest {
 
     pub fn route(name: string) -> Option<string> {
         return self.route_values.get(name)
+    }
+
+    /// The `application/x-www-form-urlencoded` body's fields, in order, parsed
+    /// on first use and cached for this request.
+    ///
+    /// It is the query-string grammar, read from the body instead of the
+    /// target, through the same parser — so a repeated name stays repeated and
+    /// `+` is a space in both. A request whose Content-Type is something else
+    /// is an error of kind `unsupported_media_type`, which answers 415: a
+    /// handler that asked for form fields and got JSON has been sent the wrong
+    /// thing, and answering with an empty field set would make that a silent
+    /// wrong answer instead.
+    pub fn form() -> Result<QueryValues> {
+        if self.form_ready { return ok(self.form_cache) }
+        let declared: string = self.headers.get("Content-Type").or("")
+        if !media_type_is(declared, "application/x-www-form-urlencoded") {
+            return err(
+                "this endpoint reads an application/x-www-form-urlencoded body, not '{declared}'",
+                "unsupported_media_type")
+        }
+        parse_query_into(self.body.to_string(), self.form_cache, true)?
+        self.form_ready = true
+        return ok(self.form_cache)
+    }
+
+    /// The first form field named `name`, or `none`. Errors the way `form()`
+    /// does when the body is not a form.
+    pub fn form_field(name: string) -> Result<Option<string>> {
+        return ok(self.form()?.get(name))
     }
 
     /// Every cookie the client sent, in order, parsed on first use and cached

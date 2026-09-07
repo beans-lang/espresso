@@ -1,0 +1,24 @@
+simple 200 count:2 a=[1] b=[2]
+plus-is-space 200 count:1 a=[hello world]
+percent 200 count:1 a=[hello world!]
+newlines 200 count:1 note=[line1
+line2	tabbed]
+empty-value 200 count:2 a=[] b=[2]
+no-equals 200 count:2 a=[] b=[2]
+repeated 200 count:3 a=[1] a=[2] a=[3]
+equals-in-value 200 count:1 a=[1=2=3]
+empty-body 200 count:0
+utf8 200 count:1 a=[café]
+charset-param 200 count:1 a=[1]
+uppercase-type 200 count:1 a=[1]
+nul 400 {"status":400,"title":"Bad Request","detail":"a form field contains a NUL byte","traceId":"espresso-13"}
+bad-escape 400 {"status":400,"title":"Bad Request","detail":"invalid percent escape in form field","traceId":"espresso-14"}
+json-body 415 {"status":415,"title":"Unsupported Media Type","detail":"this endpoint reads an application/x-www-form-urlencoded body, not 'application/json'","traceId":"espresso-15"}
+no-type 415 {"status":415,"title":"Unsupported Media Type","detail":"this endpoint reads an application/x-www-form-urlencoded body, not ''","traceId":"espresso-16"}
+both 200 query 2 [fromquery] form 2 [fromform] all fromform,two
+bound 200 name[Ada] email[ada@example.test] days[7] referrer[friend] news[true]
+bound-defaults 200 name[Ada] email[ada@example.test] days[30] referrer[] news[false]
+bound-missing 400 {"status":400,"title":"Bad Request","detail":"create.email is required","traceId":"espresso-20"}
+bound-bad-int 400 {"status":400,"title":"Bad Request","detail":"create.days must be an integer, got 'soon'","traceId":"espresso-21"}
+bound-wrong-type 415 {"status":415,"title":"Unsupported Media Type","detail":"this endpoint reads an application/x-www-form-urlencoded body, not 'application/json'","traceId":"espresso-22"}
+bound-three-sources 200 group[team] tag[beta] name[Ada]

@@ -200,6 +200,7 @@ pub class WebApplication {
                 // lie. A 400 shows its own detail (it describes the client's
                 // input) and needs no record.
                 if problem.kind != "bad_request" &&
+                   problem.kind != "unsupported_media_type" &&
                    !context.response.completed {
                     self.record_failure(context, problem.msg)
                 }
@@ -242,6 +243,7 @@ pub class WebApplication {
             ok(_) => {}
             err(problem) => {
                 if problem.kind != "bad_request" &&
+                   problem.kind != "unsupported_media_type" &&
                    !context.response.completed {
                     self.record_failure(context, problem.msg)
                 }
@@ -320,6 +322,13 @@ pub class WebApplication {
                      detail: string, kind: string) -> Result<bool> {
         if kind == "bad_request" && !context.response.completed {
             return write_problem(context, 400, "Bad Request", detail)
+        }
+        // Like a 400, this one describes what the client sent — the media
+        // type it declared — so it is shown as it is rather than hidden
+        // behind a trace id.
+        if kind == "unsupported_media_type" && !context.response.completed {
+            return write_problem(
+                context, 415, "Unsupported Media Type", detail)
         }
         if !context.response.completed {
             let shown: string = if self.options.detailed_errors {

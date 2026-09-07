@@ -57,7 +57,7 @@ assert_panic_stderr() {
     fi
 }
 
-cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date panic_reclaim di_panic defer_panic large_body bytes_body borrow server_header body_release head_cache output_release cookies upgrade stream)
+cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date panic_reclaim di_panic defer_panic large_body bytes_body borrow server_header body_release head_cache output_release cookies upgrade stream form)
 for name in "${cases[@]}"; do
     if ! "$BEANSC" run "$ROOT/tests/$name.b" \
             >"$tmp/$name.interp" 2>"$tmp/$name.interp.err"; then
@@ -79,6 +79,9 @@ if [[ ${1:-} == "--native" ]]; then
     # leg cannot fail the way native can. `panic` joins them: the info-leak fix
     # rides that same unwind, and its stderr and logger records must survive
     # native codegen, not only the tree walker.
+    # `form` joins them because it decodes percent escapes byte by byte and
+    # binds through reflection, and both are emitted per backend.
+    #
     # `stream` joins them because a chunked response is written straight to
     # the socket by the handler's own fiber — vectored writes, a 200 KB chunk,
     # a truncated body on failure — and none of that is exercised by the
@@ -101,7 +104,7 @@ if [[ ${1:-} == "--native" ]]; then
     # provider.activate() calling an initializer through reflect — and
     # reflection metadata is emitted by the backend, not shared with the
     # interpreter. It ran interpreter-only for its whole life.
-    native_cases=(smoke date panic_reclaim di_panic defer_panic panic large_body bytes_body borrow server_header body_release head_cache output_release docs cookies upgrade stream)
+    native_cases=(smoke date panic_reclaim di_panic defer_panic panic large_body bytes_body borrow server_header body_release head_cache output_release docs cookies upgrade stream form)
     for name in "${native_cases[@]}"; do
         "$BEANSC" build "$ROOT/tests/$name.b" -o "$tmp/$name" >/dev/null
         if ! "$tmp/$name" >"$tmp/$name.native" 2>"$tmp/$name.native.err"; then

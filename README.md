@@ -95,6 +95,11 @@ pub fn annotate(@espresso.route id: int,
   through its type's initializer, fields matched by name, nested
   objects and scalar lists included. Malformed bodies answer 400 with
   a problem+json explanation, never a 500.
+- `@espresso.form` reads a field from an
+  `application/x-www-form-urlencoded` body, with the same `default:` and
+  `required: false` as `@query` — it is the query-string grammar read from
+  the body, through the same parser. A body of another media type answers
+  415, not an empty field set.
 - `@espresso.inject` resolves the parameter from the request's service
   scope.
 - A parameter typed `espresso.HttpContext` binds with no annotation.
@@ -211,6 +216,21 @@ stopping at the first difference — the comparison a session token, an
 antiforgery token or an API key needs, since `==` leaks the length of the
 shared prefix through timing. `espresso.api_key` uses it; so should
 anything else in your application that compares a secret.
+
+## Forms
+
+`context.request.form()` parses an `application/x-www-form-urlencoded` body
+into the same `QueryValues` a query string parses into, once per request. It
+is the same grammar and the same parser: `+` is a space, `%xx` decodes,
+repeated names stay repeated, and `a&b=2` gives `a` an empty value.
+
+Two things differ from a query string, because a body is not a URL. A control
+byte is data here, so a `<textarea>`'s `%0D%0A` decodes to a newline instead
+of being refused; NUL stays refused in both. And a request whose Content-Type
+is not that media type is an error of kind `unsupported_media_type`, which
+answers **415** — a handler that asked for form fields and got JSON was sent
+the wrong thing, and answering with an empty field set would turn that into a
+silent wrong answer.
 
 ## Cookies
 

@@ -48,6 +48,18 @@ pub annotation header {
 @retention(value: "runtime")
 pub annotation body {}
 
+/// Binds a parameter from an `application/x-www-form-urlencoded` body — the
+/// same grammar as the query string, read from the body. Missing fields
+/// answer 400 unless a `default` is given; a body of another media type
+/// answers 415.
+@target(value: ["parameter"])
+@retention(value: "runtime")
+pub annotation form {
+    name: string = ""
+    default: string = ""
+    required: bool = true
+}
+
 /// Resolves a parameter from the request's service scope.
 @target(value: ["parameter"])
 @retention(value: "runtime")
@@ -443,7 +455,7 @@ class Binder {
 // ---- per-action plans ------------------------------------------------------
 
 // One bound parameter. kind: 0 context, 1 route, 2 query, 3 header,
-// 4 body, 5 service.
+// 4 body, 5 service, 6 form field.
 class ArgPlan {
     kind: int
     name: string
@@ -581,6 +593,25 @@ class ActionPlan {
                 }
             }
         }
+        if plan.kind == 6 {
+            let fields: QueryValues = context.request.form()?
+            match fields.get(plan.name) {
+                some(text) => {
+                    return text_to_value(
+                        text, plan.value_kind, plan.shown)
+                }
+                none => {
+                    if plan.has_fallback {
+                        if plan.fallback == "" {
+                            return ok(zero_value(plan.value_kind))
+                        }
+                        return text_to_value(
+                            plan.fallback, plan.value_kind, plan.shown)
+                    }
+                    return err("{plan.shown} is required", "bad_request")
+                }
+            }
+        }
         if plan.kind == 4 {
             let value: reflect.Value =
                 self.binder.construct(plan.body_plan, parsed_body)?
@@ -635,6 +666,14 @@ class ActionPlan {
                             400, "Bad Request", problem.msg)
                         return ok(refused)
                     }
+                    // A body of the wrong media type is the client's mistake
+                    // and is answered as one, the same way a malformed JSON
+                    // body answers 400 rather than 500.
+                    if problem.kind == "unsupported_media_type" {
+                        let refused: ActionResult = new ProblemResult(
+                            415, "Unsupported Media Type", problem.msg)
+                        return ok(refused)
+                    }
                     return err(problem.msg, problem.kind)
                 }
             }
@@ -678,7 +717,7 @@ fn parameter_marker(parameter: reflect.Parameter) ->
         let name: string = annotation.qualified_name()
         if name != "espresso.route" && name != "espresso.query" &&
            name != "espresso.header" && name != "espresso.body" &&
-           name != "espresso.inject" {
+           name != "espresso.form" && name != "espresso.inject" {
             continue
         }
         if found.is_some() {
@@ -775,7 +814,7 @@ fn build_action_plan(controller: reflect.Type,
                     continue
                 }
                 return err(
-                    "parameter {parameter.name()} of {action.name()} needs a binding annotation — @route, @query, @header, @body or @inject",
+                    "parameter {parameter.name()} of {action.name()} needs a binding annotation — @route, @query, @header, @form, @body or @inject",
                     "binding")
             }
             some(annotation) => {
@@ -803,6 +842,29 @@ fn build_action_plan(controller: reflect.Type,
                     if bound.value_kind < 0 {
                         return err(
                             "@query parameter {parameter.name()} must be int, float, bool or string",
+                            "binding")
+                    }
+                    let fallback: string = annotation_text(
+                        annotation, "default", "")
+                    if fallback != "" {
+                        bound.fallback = fallback
+                        bound.has_fallback = true
+                    } else if !annotation_flag(
+                                  annotation, "required", true) {
+                        bound.fallback = ""
+                        bound.has_fallback = true
+                    }
+                    plan.arguments.push(bound)
+                } else if marker_name == "espresso.form" {
+                    let bound: ArgPlan = new ArgPlan(
+                        6,
+                        annotation_text(
+                            annotation, "name", parameter.name()),
+                        shown)
+                    bound.value_kind = scalar_kind(type_name)
+                    if bound.value_kind < 0 {
+                        return err(
+                            "@form parameter {parameter.name()} must be int, float, bool or string",
                             "binding")
                     }
                     let fallback: string = annotation_text(
