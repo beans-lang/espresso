@@ -1,8 +1,7 @@
 simple 200 count:2 a=[1] b=[2]
 plus-is-space 200 count:1 a=[hello world]
 percent 200 count:1 a=[hello world!]
-newlines 200 count:1 note=[line1
-line2	tabbed]
+newlines 200 count:1 note=[line1<13><10>line2<9>tabbed]
 empty-value 200 count:2 a=[] b=[2]
 no-equals 200 count:2 a=[] b=[2]
 repeated 200 count:3 a=[1] a=[2] a=[3]

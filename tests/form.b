@@ -32,12 +32,31 @@ pub class SignupController extends espresso.Controller {
     }
 }
 
+// Renders a decoded value with its control bytes spelled out.
+//
+// A form field may legitimately contain CR and LF, and this suite asserts
+// exactly that — but a golden file holding a raw CRLF is a golden file git
+// rewrites on checkout, and then the gate fails on a fresh clone for a reason
+// that has nothing to do with the code. So the bytes are shown, not sent.
+fn visible(value: string) -> string {
+    var out: string = ""
+    for index: int in 0..value.len() {
+        let byte: int = value.byte_at(index)
+        if byte < 32 || byte == 127 {
+            out = "{out}<{byte}>"
+        } else {
+            out = "{out}{value.slice(index, index + 1)}"
+        }
+    }
+    return out
+}
+
 // The direct reader, without the binder in the way.
 fn raw(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
     let fields: espresso.QueryValues = context.request.form()?
     var shown: string = "count:{fields.count()}"
     for index: int in 0..fields.count() {
-        shown = "{shown} {fields.name_at(index)}=[{fields.value_at(index)}]"
+        shown = "{shown} {visible(fields.name_at(index))}=[{visible(fields.value_at(index))}]"
     }
     return espresso.text(shown)
 }
