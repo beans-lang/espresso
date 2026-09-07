@@ -76,22 +76,20 @@ This file records user-facing changes in each Espresso release.
 
 ### Requirements
 
-- **Espresso now needs a Beans built from `main`; no release compiles it.**
-  The cached response head and the borrowed-payload send call
-  `http.encode_response_head_append`, `TcpStream.write_vectored` and
-  `TcpStream.write_vectored_text`, which land in beans-lang/beans#148 (merged
-  2026-09-07) and are in no release tag — 0.1.39 was tagged the day before
-  that merge. An installed `beansc` stops in the checker on `server.b` with
-  eight errors, six of them for `encode_response_head_append`, before it
-  reaches codegen. This entry names a version number again once the release
-  carrying #148 is cut; there is no compatibility path to add here, because
-  the borrowed-payload send is what keeps a large response out of a
-  per-connection staging buffer and the older stdlib cannot express it. (#9)
-- Below that, `std.calendar`, which formats the `Date` header, first ships in
-  Beans 0.1.36; the contained-panic unwind that makes a panicking handler
-  reclaim what it held first ships in 0.1.35. The previous text stated 0.1.36
-  as the floor, which stopped being true when the vectored send landed and
-  was wrong on `main` from that merge onward.
+- **Espresso now needs Beans 0.1.40 or newer.** The cached response head and
+  the borrowed-payload send call `http.encode_response_head_append`,
+  `TcpStream.write_vectored` and `TcpStream.write_vectored_text`, which land
+  in beans-lang/beans#148 and first ship in 0.1.40. On 0.1.39 or older an
+  installed `beansc` stops in the checker on `server.b` with eight errors,
+  six of them for `encode_response_head_append`, before it reaches codegen.
+  There is no compatibility path: the borrowed-payload send is what keeps a
+  large response out of a per-connection staging buffer, and the older stdlib
+  cannot express it. The previous text said 0.1.36, which stopped being true
+  the moment the vectored send landed — for a day, between that merge and the
+  0.1.40 release, no published toolchain could build `main` at all. (#9)
+- Below that floor, `std.calendar`, which formats the `Date` header, first
+  ships in Beans 0.1.36; the contained-panic unwind that makes a panicking
+  handler reclaim what it held first ships in 0.1.35.
 
 ### Security
 
