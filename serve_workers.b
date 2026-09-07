@@ -17,6 +17,7 @@ struct WorkerLimits {
     max_body_bytes: int
     max_response_body_bytes: int
     max_pending_output_bytes: int
+    max_queued_output_bytes: int
     max_requests_per_connection: int
     max_header_count: int
     max_header_bytes: int
@@ -38,6 +39,7 @@ struct WorkerLimits {
         built.max_body_bytes = self.max_body_bytes
         built.max_response_body_bytes = self.max_response_body_bytes
         built.max_pending_output_bytes = self.max_pending_output_bytes
+        built.max_queued_output_bytes = self.max_queued_output_bytes
         built.max_requests_per_connection = self.max_requests_per_connection
         built.max_header_count = self.max_header_count
         built.max_header_bytes = self.max_header_bytes
@@ -60,6 +62,7 @@ fn worker_limits(options: ServerOptions) -> WorkerLimits {
         max_body_bytes: options.max_body_bytes,
         max_response_body_bytes: options.max_response_body_bytes,
         max_pending_output_bytes: options.max_pending_output_bytes,
+        max_queued_output_bytes: options.max_queued_output_bytes,
         max_requests_per_connection: options.max_requests_per_connection,
         max_header_count: options.max_header_count,
         max_header_bytes: options.max_header_bytes,

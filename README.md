@@ -210,6 +210,13 @@ Darwin's SO_REUSEPORT does not balance — the last socket to bind
 receives every connection — so a shared-port design there runs on
 one core no matter how many workers it starts.
 
+A connection frames pipelined responses into one output queue and sends
+them together, up to `ServerOptions.max_queued_output_bytes` (64 KiB) at a
+time; reaching that bound sends what is queued before the next response is
+framed, so a burst of pipelined requests cannot turn into an unbounded
+per-connection buffer, and a queue that did outgrow the bound hands its
+memory back rather than keeping it for the life of the connection.
+
 `context.respond_later()` hands a move-only `Responder` to any thread
 for deferred responses — return `espresso.detached()` from the handler.
 `espresso.TestHost` runs the full pipeline in memory for tests, and
@@ -245,7 +252,40 @@ generic instead of `type_of` pairs, `ServiceKey` is gone, logging moved
 to `std.log`, and the binding and filter annotations are new. It needs
 Beans 0.1.29 for explicit type arguments, package function values, and
 the reflection speed that makes controllers a first-class path, and
-**Beans 0.1.36 or newer** to build at all: the `Date` header is formatted
-with `std.calendar`, which first ships in 0.1.36. A contained panic
-reclaims its frame on 0.1.35 and later, within the platform limits noted
-under *The server*.
+0.1.36 for `std.calendar`, which formats the `Date` header. A contained
+panic reclaims its frame on 0.1.35 and later, within the platform limits
+noted under *The server*.
+
+**Beans 0.1.40 or newer is the floor.** The server frames a response
+head once and sends a large body beside it with a single vectored write,
+and that path calls three entry points that landed in
+[beans-lang/beans#148](https://github.com/beans-lang/beans/pull/148):
+`std.http.encode_response_head_append`,
+`std.net.TcpStream.write_vectored`, and `write_vectored_text`. They first
+ship in 0.1.40. On 0.1.39 or older an installed `beansc` stops in the
+checker on `server.b` — eight errors, six of them for
+`encode_response_head_append` alone — without ever reaching codegen, and
+there is no compatibility path to fall back on: the borrowed-payload send
+is how a large response avoids being staged in a per-connection buffer,
+so the older stdlib cannot express it.
+
+Building against a Beans checkout rather than an install works too, but
+a tree-built `beansc` resolves the runtime and stdlib **relative to the
+working directory**, and an installed one exports its own package's
+paths — so pointing `BEANSC` at `build/beansc` is not on its own enough.
+Pin the roots with it:
+
+```sh
+B=../../beans
+env BEANSC=$B/build/beansc \
+    BEANS_RUNTIME=$B/runtime/beans_rt.c \
+    BEANS_STDLIB=$B/stdlib/std \
+    BEANS_ENCODING=$B/runtime/encoding \
+    BEANS_NET=$B/runtime/net \
+    BEANS_LOG=$B/runtime/log \
+  ./test.sh
+```
+
+`test.sh` and `rss_gate.sh` do this for you when `BEANS_ROOT` points at
+the checkout: they `cd` into it first, which is what makes the relative
+roots resolve.

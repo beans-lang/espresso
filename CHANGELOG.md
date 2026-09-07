@@ -36,6 +36,25 @@ This file records user-facing changes in each Espresso release.
   body-forbidden status takes the original path. On /json this is ~0.6 µs less
   user time per request (~19%). (beans-lang/beans#140)
 
+- **A connection's output queue is bounded, and one that outgrew its bound is
+  released.** One read can carry hundreds of pipelined requests, and every
+  response in that batch was framed into the connection's output queue before
+  the read loop flushed, so the queue grew to hold the whole batch and — because
+  `resize(0)` frees no pages — kept that memory for the life of the connection:
+  400 pipelined GETs, 12.8 KB of requests, whose responses sit just under the
+  vectored threshold turned into a 6,048,000-byte buffer that a later one-byte
+  response did not shrink. The queue is now pushed to the peer as soon as it
+  reaches the new `ServerOptions.max_queued_output_bytes` (64 KiB by default),
+  so the peak is the bound plus the one response that crossed it, and every
+  flush releases a buffer that had outgrown the bound instead of keeping it. A
+  connection that stays under the bound never reallocates, so small pipelined
+  responses keep batching into one write exactly as before, and responses keep
+  their pipelined order either way — the queue only ever ends on a response
+  boundary. `ServerStats` now reports `output_queue_peak`,
+  `output_queue_flushes` and `output_buffers_released`. Eight idle connections
+  that had each pipelined 200 15,000-byte responses measured 29 MiB resident
+  before and 6.6 MiB after. (beans-lang/espresso#7)
+
 - **A request body no longer grows unboundedly with a connection's lifetime.**
   The request body is sized to its declared `Content-Length` before its pieces
   arrive, so assembling a body larger than one read fills one allocation instead
@@ -95,9 +114,20 @@ This file records user-facing changes in each Espresso release.
 
 ### Requirements
 
-- Espresso now needs **Beans 0.1.36 or newer**. `std.calendar`, which formats
-  the `Date` header, first ships in 0.1.36; the contained-panic unwind that
-  makes a panicking handler reclaim what it held first ships in 0.1.35.
+- **Espresso now needs Beans 0.1.40 or newer.** The cached response head and
+  the borrowed-payload send call `http.encode_response_head_append`,
+  `TcpStream.write_vectored` and `TcpStream.write_vectored_text`, which land
+  in beans-lang/beans#148 and first ship in 0.1.40. On 0.1.39 or older an
+  installed `beansc` stops in the checker on `server.b` with eight errors,
+  six of them for `encode_response_head_append`, before it reaches codegen.
+  There is no compatibility path: the borrowed-payload send is what keeps a
+  large response out of a per-connection staging buffer, and the older stdlib
+  cannot express it. The previous text said 0.1.36, which stopped being true
+  the moment the vectored send landed — for a day, between that merge and the
+  0.1.40 release, no published toolchain could build `main` at all. (#9)
+- Below that floor, `std.calendar`, which formats the `Date` header, first
+  ships in Beans 0.1.36; the contained-panic unwind that makes a panicking
+  handler reclaim what it held first ships in 0.1.35.
 
 ### Security
 
