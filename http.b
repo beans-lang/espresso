@@ -4,7 +4,13 @@ import std.encoding.json
 import std.http
 import std.net
 
-/// Query fields in arrival order. Repeated names stay repeated.
+/// Named text fields in arrival order, repeated names kept repeated.
+///
+/// The same bag serves the three places a request carries name/value text:
+/// the query string, an `application/x-www-form-urlencoded` body, and the
+/// `Cookie` header. Order is preserved because `a=1&a=2` and `a=2&a=1` are
+/// different inputs, and `get` answers with the first, which is what every
+/// other server does.
 pub class QueryValues {
     names: List<string> = []
     values: List<string> = []
@@ -164,6 +170,8 @@ pub unique class HttpRequest {
     segments_ready: bool = false
     query_cache: QueryValues = new QueryValues()
     query_ready: bool = false
+    cookie_cache: QueryValues = new QueryValues()
+    cookies_ready: bool = false
 
     fn init(remote: net.Address) {
         self.remote = remote
@@ -183,6 +191,7 @@ pub unique class HttpRequest {
         self.route_values.clear()
         self.segments_ready = false
         self.query_ready = false
+        self.cookies_ready = false
         if head.target == "" || head.target.byte_at(0) != 47 {
             return err("the request target must use origin form", "bad_request")
         }
@@ -268,6 +277,22 @@ pub unique class HttpRequest {
     pub fn route(name: string) -> Option<string> {
         return self.route_values.get(name)
     }
+
+    /// Every cookie the client sent, in order, parsed on first use and cached
+    /// for this request. Values are exactly the bytes that arrived: a cookie
+    /// is opaque to RFC 6265, so nothing is decoded here and nothing was
+    /// encoded by `set_cookie`.
+    pub fn cookies() -> QueryValues {
+        if self.cookies_ready { return self.cookie_cache }
+        parse_cookies_into(self.headers, self.cookie_cache)
+        self.cookies_ready = true
+        return self.cookie_cache
+    }
+
+    /// The first cookie named `name`, or `none`.
+    pub fn cookie(name: string) -> Option<string> {
+        return self.cookies().get(name)
+    }
 }
 
 /// A buffered HTTP response. The server owns Content-Length and Connection.
@@ -323,6 +348,33 @@ pub unique class HttpResponse {
     pub fn header(name: string, value: string) {
         self.headers.add(name, value)
         self.has_custom = true
+    }
+
+    /// Adds one `Set-Cookie` header, refusing anything that would forge the
+    /// header's own structure.
+    ///
+    /// A cookie name or value carrying `;` writes an attribute the caller
+    /// never asked for, and one carrying CR or LF splices whole headers into
+    /// the response, so both are refused here — at the call that names the
+    /// cookie, and before anything is serialized. The refusal is a program
+    /// error (kind `cookie`), not a client one: it says which cookie and what
+    /// about it, and the request answers 500 with the detail in the server
+    /// log rather than shipping a broken response.
+    ///
+    /// Called more than once it adds more than one header, which is how
+    /// several cookies are set; a response carrying a cookie is never framed
+    /// from this connection's cached head.
+    ///
+    /// The attributes are always passed, never defaulted at this call: a
+    /// `new CookieOptions()` already carries the safe set (path `/`,
+    /// `HttpOnly`, `Secure`, `SameSite=Lax`, session lifetime), and writing it
+    /// out is what makes a deliberate `secure = false` on a development server
+    /// visible in the code that chose it.
+    pub fn set_cookie(name: string,
+                      value: string,
+                      options: CookieOptions) -> Result<bool> {
+        self.header("Set-Cookie", set_cookie_value(name, value, options)?)
+        return ok(true)
     }
 
     /// Finishes the response with a `Bytes` body, moved in without a copy.

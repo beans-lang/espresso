@@ -1,0 +1,32 @@
+name bytes 77 position-splits 0
+name set [!#$%&'*+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz|~]
+value bytes 90 position-splits 0
+value set [!#$%&'()*+-./0123456789:<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~]
+empty value true empty name false
+path-semicolon refused cookie: the Path of cookie 'sid' carries a semicolon, comma or control byte
+path-comma refused cookie: the Path of cookie 'sid' carries a semicolon, comma or control byte
+domain-crlf refused cookie: the Domain of cookie 'sid' carries a semicolon, comma or control byte
+samesite-none-secure ok [sid=v; Path=/; HttpOnly; Secure; SameSite=None]
+samesite-none-insecure refused cookie: cookie 'sid' asks for SameSite=None without Secure; a browser drops such a cookie, so this would be a login that silently never happens
+bare ok [sid=v; SameSite=Lax]
+full ok [sid=v; Path=/app; Domain=app.test; Max-Age=60; HttpOnly; Secure; SameSite=Strict]
+deleted ok [sid=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax]
+round-trip 15 refused 0 mismatches 0
+[sid=one] -> count:1 sid=one
+[sid=one; theme=dark] -> count:2 sid=one theme=dark
+[  sid=one ;   theme=dark  ] -> count:2 sid=one theme=dark
+[sid=one;;theme=dark] -> count:2 sid=one theme=dark
+[sid=one; sid=two] -> count:2 sid=one sid=two
+[empty=; sid=one] -> count:2 empty= sid=one
+[novalue; sid=one] -> count:1 sid=one
+[=orphan; sid=one] -> count:1 sid=one
+[sid=a=b=c] -> count:1 sid=a=b=c
+[	sid=one	] -> count:1 sid=one
+[] -> count:0
+two-headers count:2 sid=one theme=dark
+set sid=s3cr3t-token; Path=/; Max-Age=3600; HttpOnly; Secure; SameSite=Lax
+set theme=dark; Path=/ui; SameSite=Strict
+set stale=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax
+forged status 500 headers 0
+[count:2 sid=one theme=dark]x1 [count:0]x1 [count:1 sid=three]x1 set-cookie 3 stopped true
+requests 4 responses 4 errors 0

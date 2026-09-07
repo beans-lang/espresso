@@ -212,6 +212,39 @@ antiforgery token or an API key needs, since `==` leaks the length of the
 shared prefix through timing. `espresso.api_key` uses it; so should
 anything else in your application that compares a secret.
 
+## Cookies
+
+`context.request.cookie(name)` reads one cookie; `request.cookies()` is the
+whole jar in arrival order, parsed once per request. Values are the bytes
+that arrived — a cookie is opaque to RFC 6265, so espresso decodes nothing.
+
+```beans
+match context.request.cookie("sid") {
+    some(token) => { io.println(token) }
+    none => {}
+}
+
+let options: espresso.CookieOptions = new espresso.CookieOptions()
+options.max_age_seconds = 3600
+context.response.set_cookie("sid", token, options)?
+```
+
+`CookieOptions` defaults to the safe set: `Path=/`, `HttpOnly`, `Secure`,
+`SameSite=Lax`, and no `Max-Age` (a session cookie). `max_age_seconds = 0`
+deletes; a negative value omits the attribute. `secure` defaults to **true**,
+so a plain-http development server has to turn it off on purpose — Safari
+drops a `Secure` cookie from `http://localhost`, and a cookie the browser
+drops is a login that silently never happens.
+
+`set_cookie` refuses rather than serializes. A name that is not a token, a
+value outside RFC 6265's `cookie-octet`, a `Path` or `Domain` carrying a
+semicolon, comma, CR or LF, or `SameSite=None` without `Secure` all come back
+as an error naming the cookie — before anything is written, so a value taken
+from user input can never forge an attribute or splice a second header into
+the response. Because nothing is encoded on the way out and nothing is decoded
+on the way in, a value that `set_cookie` accepts comes back from `cookie()`
+byte for byte.
+
 ## Logging
 
 Espresso logs on `std.log`. `espresso.console_logger(name)` builds the
