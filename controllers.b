@@ -6,6 +6,8 @@
 // — so a request runs with no metadata lookups.
 package espresso
 
+import barista
+
 import std.reflect
 
 @target(value: ["type"])
@@ -183,7 +185,7 @@ pub fn add_controllers(builder: WebApplicationBuilder) -> Result<int> {
         if type.kind() != reflect.Kind.class_type {
             return err("@controller can only mark a class", "controller")
         }
-        builder.services.add(type, type, ServiceLifetime.scoped)?
+        builder.services.add(type, type, barista.ServiceLifetime.scoped)?
         count += 1
     }
     return ok(count)

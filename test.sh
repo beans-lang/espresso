@@ -57,7 +57,7 @@ assert_panic_stderr() {
     fi
 }
 
-cases=(di routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_bad di_scan_conflict date panic_reclaim di_panic defer_panic large_body bytes_body borrow server_header body_release head_cache output_release cookies upgrade stream form multipart)
+cases=(routing config_logging features fuzz server defer panic docs mvc binding_fuzz di_scan di_scan_controller date panic_reclaim defer_panic large_body bytes_body borrow server_header body_release head_cache output_release cookies upgrade stream form multipart)
 for name in "${cases[@]}"; do
     if ! "$BEANSC" run "$ROOT/tests/$name.b" \
             >"$tmp/$name.interp" 2>"$tmp/$name.interp.err"; then
@@ -109,7 +109,15 @@ if [[ ${1:-} == "--native" ]]; then
     # provider.activate() calling an initializer through reflect — and
     # reflection metadata is emitted by the backend, not shared with the
     # interpreter. It ran interpreter-only for its whole life.
-    native_cases=(smoke date panic_reclaim di_panic defer_panic panic large_body bytes_body borrow server_header body_release head_cache output_release docs cookies upgrade stream form multipart)
+    #
+    # `di_scan` and `di_scan_controller` join them for the same reason, and
+    # because they could not before: the old di suites told one instance from
+    # another with `==` on class references, which the native emitter refuses,
+    # so every DI suite espresso had was interpreter-only. Identity is a minted
+    # int now. The container itself is barista's to test; what is left here is
+    # the wrapper — that the scan lands in THIS builder's collection, and that
+    # @service on a @controller is refused.
+    native_cases=(smoke date panic_reclaim defer_panic panic large_body bytes_body borrow server_header body_release head_cache output_release docs di_scan di_scan_controller cookies upgrade stream form multipart)
     for name in "${native_cases[@]}"; do
         "$BEANSC" build "$ROOT/tests/$name.b" -o "$tmp/$name" >/dev/null
         if ! "$tmp/$name" >"$tmp/$name.native" 2>"$tmp/$name.native.err"; then

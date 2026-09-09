@@ -22,6 +22,7 @@
 //   GET    /openapi.json                 the route table
 package main
 
+import barista
 import espresso
 import std.encoding.json
 import std.http
@@ -73,7 +74,7 @@ pub interface ProjectStore {
     fn remove(id: int) -> bool
 }
 
-@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
+@barista.service(lifetime: barista.ServiceLifetime.singleton)
 pub class MemoryStore implements ProjectStore {
     projects: List<Project>
     next_project: int
@@ -146,7 +147,7 @@ pub class MemoryStore implements ProjectStore {
 }
 
 /// API keys with two levels. A real service would look these up.
-@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
+@barista.service(lifetime: barista.ServiceLifetime.singleton)
 pub class KeyRing implements espresso.Authorizer {
     pub fn init() {}
 

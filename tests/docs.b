@@ -2,6 +2,7 @@
 // package. A README line that does not compile fails here.
 package main
 
+import barista
 import espresso
 import std.encoding.json
 import std.http
@@ -29,7 +30,7 @@ pub interface Cache {
     fn get(key: string) -> string
 }
 
-@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
+@barista.service(lifetime: barista.ServiceLifetime.singleton)
 pub class MemoryCache implements Cache {
     pub fn init() {}
     pub fn get(key: string) -> string { return "cached:{key}" }
@@ -122,9 +123,9 @@ fn main() {
     builder.services.add_singleton<Clock, SystemClock>().expect("clock")
     builder.services.add_scoped<Store, Store>().expect("store")
     builder.services.transient<Greeter>().expect("greeter")
-    espresso.add_singleton_factory<Config>(
+    barista.add_singleton_factory<Config>(
         builder.services,
-        fn(provider: espresso.ServiceProvider) -> Result<Config> {
+        fn(provider: barista.ServiceProvider) -> Result<Config> {
             return ok(load_config())
         }).expect("factory")
 
@@ -172,7 +173,7 @@ fn main() {
     io.println("openapi {host.get("/openapi.json").expect("spec").status}")
 
     // resolve<T> from a request scope
-    let scope: espresso.ServiceProvider =
+    let scope: barista.ServiceProvider =
         app.services.create_scope().expect("scope")
     let store: Store = scope.resolve<Store>().expect("resolve")
     io.println("resolved {store.label()}")
@@ -180,7 +181,7 @@ fn main() {
     io.println("scanned {cache.get("answer")}")
     scope.close().expect("scope close")
 
-    let scope2: espresso.ServiceProvider =
+    let scope2: barista.ServiceProvider =
         app.services.create_scope().expect("scope2")
 
     // activate: a type the container never registered, constructed with its

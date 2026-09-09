@@ -1,5 +1,7 @@
 package espresso
 
+import barista
+
 import std.encoding.json
 import std.http
 import std.net
@@ -539,9 +541,9 @@ pub unique class HttpResponse {
 pub class HttpContext {
     pub request: HttpRequest
     pub response: HttpResponse = new HttpResponse()
-    pub services: ServiceProvider
+    pub services: barista.ServiceProvider
     pub head_only: bool = false
-    root_services: ServiceProvider
+    root_services: barista.ServiceProvider
     scope_active: bool = false
     trace_seq: int = 0
     trace_text: string = ""
@@ -569,7 +571,7 @@ pub class HttpContext {
     server_header_value: string = ""
 
     pub fn init(move request: HttpRequest,
-                services: ServiceProvider,
+                services: barista.ServiceProvider,
                 server_header: string = "") {
         self.request = move request
         self.services = services
@@ -733,7 +735,7 @@ pub class HttpContext {
     pub fn close() -> Result<bool> {
         if self.scope_active {
             self.scope_active = false
-            let scope: ServiceProvider = self.services
+            let scope: barista.ServiceProvider = self.services
             self.services = self.root_services
             return scope.close_scope()
         }

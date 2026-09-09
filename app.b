@@ -1,5 +1,7 @@
 package espresso
 
+import barista
+
 import std.http
 import std.io
 import std.log
@@ -28,7 +30,7 @@ pub class AppOptions {
 
 /// Collects services before the application is frozen.
 pub class WebApplicationBuilder {
-    pub services: ServiceCollection = new ServiceCollection()
+    pub services: barista.ServiceCollection = new barista.ServiceCollection()
     pub options: AppOptions = new AppOptions()
     built: bool = false
 
@@ -48,7 +50,7 @@ pub class WebApplicationBuilder {
 pub class WebApplication {
     /// The root provider. Create scopes from it for work outside a
     /// request; inside one, use context.services.
-    pub services: ServiceProvider
+    pub services: barista.ServiceProvider
     options: AppOptions
     router: Router = new Router()
     middleware: List<fn(HttpContext,
@@ -56,7 +58,7 @@ pub class WebApplication {
     trace_sequence: int = 0
     closed: bool = false
 
-    fn init(services: ServiceProvider, options: AppOptions) {
+    fn init(services: barista.ServiceProvider, options: AppOptions) {
         self.services = services
         self.options = options
     }

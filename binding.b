@@ -9,6 +9,8 @@
 // ActionResult back to the router.
 package espresso
 
+import barista
+
 import std.encoding.json
 import std.reflect
 import std.time
@@ -514,7 +516,7 @@ class ActionPlan {
     fn authorize(context: HttpContext) -> Result<Option<ActionResult>> {
         if !self.has_auth { return ok(none) }
         var boxed: Option<reflect.Value> = none
-        match context.services.resolve_value(type_of(Authorizer)) {
+        match context.services.resolve_type(type_of(Authorizer)) {
             ok(value) => { boxed = some(value) }
             err(_) => {
                 return ok(some(new ProblemResult(
@@ -623,7 +625,7 @@ class ActionPlan {
         }
         let service_type: reflect.Type =
             plan.service.expect("service type")
-        return context.services.resolve_value(service_type)
+        return context.services.resolve_type(service_type)
     }
 
     fn needs_body() -> bool {
@@ -683,7 +685,7 @@ class ActionPlan {
             return ok(failed)
         }
         let receiver: reflect.Value =
-            context.services.resolve_value(self.controller)?
+            context.services.resolve_type(self.controller)?
         if self.attach_context {
             match receiver as? Controller {
                 some(base) => { base.attach(context) }

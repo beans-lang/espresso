@@ -1,1 +1,0 @@
-scan service_conflict: service espresso$entry.Mailer is provided by both espresso$entry.SmtpMailer and espresso$entry.LogMailer — drop @service from one and register your choice explicitly

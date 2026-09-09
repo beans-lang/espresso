@@ -16,6 +16,8 @@
 //   {{.}}           the current scalar inside an array section
 package espresso
 
+import barista
+
 import std.encoding.json
 import std.reflect
 
@@ -305,9 +307,9 @@ pub class Views {
 /// Registers a compiled view collection as the app's singleton Views.
 pub fn add_views(builder: WebApplicationBuilder,
                  views: Views) -> Result<bool> {
-    return add_singleton_factory<Views>(
+    return barista.add_singleton_factory<Views>(
         builder.services,
-        fn(provider: ServiceProvider) -> Result<Views> {
+        fn(provider: barista.ServiceProvider) -> Result<Views> {
             return ok(views)
         })
 }
@@ -326,7 +328,7 @@ pub class ViewResult implements ActionResult {
 
     pub fn execute(context: HttpContext) -> Result<bool> {
         var views: Option<reflect.Value> = none
-        match context.services.resolve_value(type_of(Views)) {
+        match context.services.resolve_type(type_of(Views)) {
             ok(value) => { views = some(value) }
             err(_) => {
                 let missing: ProblemResult = new ProblemResult(

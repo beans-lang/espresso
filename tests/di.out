@@ -1,9 +1,0 @@
-hello 42
-scoped same true
-scoped split true
-transient split true
-singleton same true
-root scope scope
-cycle service_cycle
-captive scope scope
-closed root closed

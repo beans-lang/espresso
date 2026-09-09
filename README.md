@@ -119,6 +119,10 @@ win over the controller's.
 
 ## Services
 
+The container is [barista](../barista), its own package. Espresso requires it,
+so an application that uses espresso gets it; name a barista type in your own
+source and add `require path` for it as well.
+
 Registration is generic and typed; lifetimes are transient, scoped and
 singleton. `resolve` is a method on any provider or scope.
 
@@ -134,20 +138,20 @@ escape hatch for types only known at runtime — the controller scanner
 itself uses it — and factories cover values built by hand:
 
 ```beans
-espresso.add_singleton_factory<Config>(
+barista.add_singleton_factory<Config>(
     builder.services,
-    fn(provider: espresso.ServiceProvider) -> Result<Config> {
+    fn(provider: barista.ServiceProvider) -> Result<Config> {
         return ok(load_config())
     })?
 ```
 
-Registration can also be discovered. `@espresso.service` marks a class;
+Registration can also be discovered. `@barista.service` marks a class;
 `espresso.add_services(builder)` scans and registers it as itself and as
 each interface it directly implements, forwarded so one scope shares one
 instance across all of its names:
 
 ```beans
-@espresso.service(lifetime: espresso.ServiceLifetime.singleton)
+@barista.service(lifetime: barista.ServiceLifetime.singleton)
 pub class SystemClock implements Clock {
     pub fn init() {}
     pub fn now() -> int { return 0 }
@@ -162,7 +166,14 @@ drop the annotation from one and register your choice explicitly. A
 language `singleton class` cannot be container-activated and is refused
 at scan time; register its `.instance` through a factory instead.
 `@controller` classes are already scoped services and refuse a second
-`@service` marking.
+`@service` marking — that last refusal is the only thing
+`espresso.add_services` adds over `barista.add_services`, and it is why the
+wrapper exists.
+
+A request scope is opened before the middleware pipeline and released after
+the response, so a `scoped` service is one instance per request. A service that
+owns a resource implements `barista.Disposable` and is closed with the scope,
+in reverse creation order.
 
 Scope discipline is validated: resolving a scoped service from the root
 provider, capturing a scoped service inside a singleton, and dependency

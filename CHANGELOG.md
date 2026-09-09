@@ -4,6 +4,58 @@ This file records user-facing changes in each Espresso release.
 
 ## [Unreleased]
 
+### Changed — BREAKING: the DI container moved out
+
+- **`di.b` is now the [barista](../barista) package.** A container is not a web
+  framework's business: latte wants one for its pages and view-models, and a
+  desktop toolkit would want the same one without taking an HTTP server with
+  it. Espresso `require`s barista, so an application that uses espresso gets
+  the container; an application that names a barista type in its **own** source
+  adds `require path "../../community-libs/barista"` too.
+
+  Espresso's names for those types are **gone, not aliased**. Two names for one
+  type is two things to keep in step, and a shim has to be maintained for as
+  long as anyone believes it. Rename:
+
+  | was | now |
+  |---|---|
+  | `espresso.ServiceCollection` | `barista.ServiceCollection` |
+  | `espresso.ServiceProvider` | `barista.ServiceProvider` |
+  | `espresso.ServiceLifetime` | `barista.ServiceLifetime` |
+  | `@espresso.service` | `@barista.service` |
+  | `espresso.add_singleton_factory` and its transient/scoped twins | `barista.add_singleton_factory` … |
+  | `provider.resolve_value(type)` | `provider.resolve_type(type)` |
+
+  `espresso.add_services(builder)` **stays** and keeps its signature. It is the
+  one part that could not move: it refuses `@service` on a `@controller`, and
+  barista knows nothing about controllers.
+
+- **A service can now be closed, not only freed.** `barista.Disposable` gets
+  `dispose()` called when its scope closes, in reverse creation order — so a
+  service holding a socket or a file is released with the request. ARC was
+  never enough for this: `deinit` may not park, and an object that dies inside
+  a reference cycle never runs its `deinit` at all.
+
+- **A resolve costs less than half what it did.** Caching the activation plan
+  and keying the registry by name instead of scanning a list took
+  `resolve<Zero>()` from 740 ns to 445 ns and `resolve<Three>()` from 1974 ns
+  to 1067 ns, measured natively. No behaviour changed; no golden moved.
+
+### Fixed
+
+- **`@service` on a `@controller` had never been tested.** The refusal was
+  written, shipped, and never exercised — `tests/di_scan_controller.b` now
+  trips it, with an accepted control beside it so a coarser failure cannot pass
+  for it.
+
+- **The DI suites now run on the native backend.** Every one of them was
+  interpreter-only, because they told one instance from another with `==` on
+  two class references — which the checker and the interpreter accept and
+  `beansc build` refuses (`beans/test/emitter_gaps.tsv:92`). Reflection
+  metadata is emitted per backend, so a container is exactly the wrong thing to
+  have tested on one. Identity is a minted int now, and `di_scan` and
+  `di_scan_controller` are in `native_cases`.
+
 ### Changed
 
 - **`BytesResult` hands its payload to the response instead of copying it, and

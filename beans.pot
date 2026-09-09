@@ -1,2 +1,11 @@
 module espresso
 kind library
+
+# The dependency-injection container lives in its own package now. It was
+# `di.b` here; it moved because a container is not a web framework's business —
+# latte wants one for its pages and view-models, and a desktop toolkit would
+# want the same one without taking an HTTP server with it.
+#
+# The path is written so it resolves from `community-libs/espresso` and from a
+# worktree beside it, the same way latte's row for espresso is.
+require path "../../community-libs/barista"

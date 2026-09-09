@@ -1,0 +1,2 @@
+scan service: espresso$entry.ThingsController is a @controller, which is already a scoped service — drop its @service
+the control resolves ordinary
