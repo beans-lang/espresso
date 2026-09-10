@@ -4,14 +4,13 @@ import std.http
 import std.net
 
 // The path half of a route, without the method or the handler: the parsed
-// segments, the parameter names, what each segment is (0 literal,
-// 1 parameter, 2 catch-all) and the specificity score.
+// segments, the parameter names, what each segment is (0 literal, 1
+// parameter, 2 catch-all) and the specificity score.
 //
-// It sits in its own class because two tables share it. An ordinary route is
-// a method plus this plus a handler; an upgrade endpoint is this plus an
-// upgrade handler, matched only when the parser says the client asked to
-// switch protocols. Two copies of segment matching would drift, and the copy
-// nobody reads is the one that would.
+// Its own class because two tables share it: an ordinary route is a method
+// plus this plus a handler; an upgrade endpoint is this plus an upgrade
+// handler, matched only when the parser flags a protocol switch. One copy
+// of segment matching, not two that could drift apart.
 class RoutePattern {
     pattern: string
     segments: List<string>
@@ -115,31 +114,29 @@ class Route {
 /// One protocol-upgrade endpoint: a handler that is given the connection
 /// itself, not a response to fill in.
 ///
-/// It is an interface and not a function because a function type in Beans
-/// cannot declare a `move` parameter, and because an upgrade handler almost
-/// always carries state — a registry of live sockets, a configuration — the
-/// way `Middleware` does.
+/// It is an interface, not a function: a function type in Beans cannot
+/// declare a `move` parameter, and an upgrade handler usually carries state
+/// anyway — a registry, a configuration — the way `Middleware` does.
 ///
-/// `upgrade` is called only after the middleware pipeline has run and let the
-/// request through, so authentication, cookies and an `Origin` check apply to
-/// a handshake exactly as they do to a request. By the time it is called the
-/// connection fiber has given up the socket: it will not read it, write it,
-/// or close it again, and this handler owns it for the rest of its life.
-/// `request` is the raw parsed head, which is what `websocket.accept_websocket`
-/// needs — the handshake fields, the HTTP version and the method live there
-/// and not on `HttpContext.request`. It is valid for the duration of the call.
+/// `upgrade` runs only after the middleware pipeline lets the request
+/// through, so authentication, cookies and an `Origin` check apply to a
+/// handshake exactly as they do to a request. By then the connection fiber
+/// has given up the socket for good — it will not read, write or close it
+/// again — and this handler owns it for the rest of its life. `request` is
+/// the raw parsed head, valid for the call: the handshake fields, HTTP
+/// version and method live there, not on `HttpContext.request`, which is
+/// what `websocket.accept_websocket` needs.
 ///
-/// Returning an error ends the connection and is recorded server-side; there
-/// is no way to answer with a status, because the socket is gone.
+/// Returning an error ends the connection and is recorded server-side;
+/// there is no way to answer with a status, because the socket is gone.
 ///
-/// **The socket arrives registered with this worker's fiber netpoller, and
-/// every read on it parks the fiber rather than holding the thread.** That
-/// holds for `read`, `read_exact` and `read_into` alike, so a handler that
-/// waits — for the next WebSocket frame, for the next line — costs one parked
-/// fiber and leaves the worker free for every other connection on it. Two
-/// upgraded connections on one worker are served concurrently, which
-/// tests/upgrade.b measures rather than assumes: a handler that waits 900ms is
-/// overtaken by one that arrives 200ms later and waits 100ms.
+/// **The socket arrives registered with this worker's fiber netpoller: every
+/// read on it — `read`, `read_exact`, `read_into` — parks the fiber rather
+/// than holding the thread.** A handler that waits for the next frame costs
+/// one parked fiber, leaving the worker free for every other connection on
+/// it. Two upgraded connections on one worker run concurrently:
+/// `tests/upgrade.b` measures a handler waiting 900ms overtaken by one that
+/// arrives 200ms later and waits only 100ms.
 ///
 /// The handler runs on a child fiber, so a panic inside it is contained: it
 /// ends this one connection, is recorded server-side, and the server keeps
@@ -310,14 +307,14 @@ pub class Router {
         return self.map("DELETE", pattern, handler)
     }
 
-    /// Registers a protocol-upgrade endpoint. Patterns are the ordinary route
-    /// patterns, parameters and catch-all included, and they are captured into
+    /// Registers a protocol-upgrade endpoint. Patterns are ordinary route
+    /// patterns, parameters and catch-all included, captured into
     /// `request.route_values` before the handler runs.
     ///
-    /// There is no method: RFC 6455 requires GET for a WebSocket handshake and
-    /// `accept_websocket` enforces it, and another protocol may reasonably
-    /// upgrade from something else. What selects this table is the client
-    /// asking to switch protocols, not the verb.
+    /// No method is required: RFC 6455 requires GET for a WebSocket
+    /// handshake (enforced by `accept_websocket`), but another protocol may
+    /// reasonably upgrade from something else. This table is selected by
+    /// the client asking to switch protocols, not by the verb.
     pub fn map_upgrade(pattern: string,
                        handler: UpgradeHandler) -> Result<bool> {
         let shape: RoutePattern = parsed_pattern(pattern)?
@@ -334,12 +331,12 @@ pub class Router {
 
     /// The pipeline terminal for a request that asked to switch protocols.
     ///
-    /// It selects the most specific matching upgrade endpoint, records it on
-    /// the context and writes nothing — the connection fiber reads the
-    /// selection afterwards and hands the socket over. When nothing matches it
-    /// answers 400, because the parser has already stopped and this connection
-    /// can no longer carry an ordinary request: there is no "ignore the
-    /// Upgrade header and serve it normally" left to fall back to.
+    /// Selects the most specific matching upgrade endpoint and records it on
+    /// the context, writing nothing — the connection fiber reads the
+    /// selection afterwards and hands the socket over. No match answers 400:
+    /// the parser has already stopped, so this connection can no longer
+    /// carry an ordinary request, and there is no falling back to serving it
+    /// normally.
     fn dispatch_upgrade(context: HttpContext) -> Result<bool> {
         context.request.ensure_segments()?
         var best_score: int = -1

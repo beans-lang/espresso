@@ -1,19 +1,17 @@
 // multipart/form-data: a push parser, per-part sinks, and the limits that
 // make an upload endpoint safe to expose.
 //
-// The parser is fed the way std.http's is — push bytes, take events — because
-// a boundary lands across a read as often as not, and a parser that can only
-// see a whole body has no answer for that. Every state it can be left in
-// between feeds is a state it can resume from, which is what the byte-split
-// property in tests/multipart.b measures: however the same bytes are cut up,
-// the same parts come out.
+// Fed the way std.http's parser is — push bytes, take events — because a
+// boundary lands across a read as often as not, and a whole-body-only
+// parser has no answer for that. Every state it can be left in between
+// feeds is resumable, which is the byte-split property `tests/multipart.b`
+// measures: however the same bytes are cut up, the same parts come out.
 //
-// Two rules run through the whole file. **The client's Content-Type is never
-// trusted**: an allowed-type list can refuse a part, never authorize one, and
-// nothing downstream learns what a file is from what the client called it.
-// **The submitted filename is metadata, never a path**: stored bytes are named
-// by an id this package generates, and there is deliberately no helper that
-// turns a submitted name into a path, because that helper is the bug.
+// Two rules run through the whole file. **The client's Content-Type is
+// never trusted**: an allowed-type list can refuse a part, never authorize
+// one. **The submitted filename is metadata, never a path**: stored bytes
+// are named by a generated id, and there is deliberately no helper that
+// turns a submitted name into a path — that helper is the bug.
 package espresso
 
 import std.http

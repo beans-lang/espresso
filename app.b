@@ -10,19 +10,14 @@ import std.net
 /// Safe production defaults. Development may opt into detailed errors.
 pub class AppOptions {
     pub detailed_errors: bool = false
-    /// The `Server` header value, sent on every response. Empty by default —
-    /// like Go's net/http and Bun, espresso identifies itself in no header
-    /// unless asked to. Set it to a non-empty value (e.g. "espresso") to opt
-    /// back in; those bytes are then framed on every response.
+    /// The `Server` header value, sent on every response. Empty by default;
+    /// set it to a non-empty value (e.g. "espresso") to opt back in.
     pub server_header: string = ""
-    /// Where a failed request's server-side record goes. `none` (the default)
-    /// writes it to stderr — no logger to name, no shared state to race, one
-    /// line per failure, and it never touches a program's stdout. Set a
-    /// logger to route the record into std.log instead; then stderr is left
-    /// alone. Either way the record carries the failure detail and the trace
-    /// id the client was handed, so the generic production response's promise
-    /// of a findable log is real. Naming a shared logger is the application's
-    /// concern, not espresso's.
+    /// Where a failed request's server-side record goes. `none` (the
+    /// default) writes one line per failure to stderr and never touches a
+    /// program's stdout. Set a logger to route it into `std.log` instead.
+    /// Either way the record carries the failure detail and the trace id the
+    /// client was handed.
     pub error_logger: Option<log.Logger> = none
 
     pub fn init() {}
@@ -185,14 +180,11 @@ pub class WebApplication {
         match self.run_pipeline(context, 0) {
             ok(_) => {}
             err(problem) => {
-                // A streamed response has already sent its head, so there is
-                // no status left to change and no body to replace: the
-                // connection truncates what was written and closes. Record it
-                // and hand the failure back rather than rendering a 500 into a
-                // response nobody will read.
-                // The connection records it: every failure that reaches the
-                // shield's join is recorded there, and recording it twice
-                // would put two lines in the log for one request.
+                // A streamed response has already sent its head: there is no
+                // status left to change and no body to replace, so hand the
+                // failure back instead of rendering an unread 500. The
+                // connection is what records it, at the shield's join —
+                // recording it again here would double the log line.
                 if context.is_streaming() {
                     return err(problem.msg, problem.kind)
                 }
@@ -229,15 +221,11 @@ pub class WebApplication {
 
     /// Runs the pipeline for a request that asked to switch protocols.
     ///
-    /// Afterwards exactly one of two things is true, and the connection fiber
-    /// reads which: either `context.claim_upgrade()` names an endpoint and no
-    /// response was completed — hand the socket over — or a response is ready
-    /// to send and the connection stays HTTP to the end.
-    ///
-    /// A layer that completed a response wins over a selected endpoint even if
-    /// it also called `next`. The socket is handed away irrevocably, so the
-    /// only safe direction to resolve that contradiction is the one that keeps
-    /// it: answer, and do not upgrade.
+    /// Afterwards, exactly one holds: `context.claim_upgrade()` names an
+    /// endpoint and no response was completed — hand the socket over — or a
+    /// response is ready and the connection stays HTTP. A layer that both
+    /// completed a response and called `next` still wins: the socket hand-off
+    /// is irrevocable, so a completed response always keeps it.
     fn handle_upgrade_context(context: HttpContext) -> Result<bool> {
         if self.closed { return err("the application is closed", "closed") }
         context.open_scope()?
@@ -279,22 +267,16 @@ pub class WebApplication {
         return ok(true)
     }
 
-    // The server-side record for a failed request — the piece the generic
-    // production response promises ("use the trace id to find the server
-    // log") but that nothing wrote before. `detail` is the returned err's
-    // message, or a contained panic's "runtime panic at L:C: ..." text (which
-    // already embeds the source position); it is paired with the request line
-    // and the SAME trace id the client was handed, so an operator can
-    // correlate the log line with the response the client reports.
+    // The server-side record a failed request's generic response promises
+    // ("use the trace id to find the server log"). `detail` is the returned
+    // err's message, or a contained panic's "runtime panic at L:C: ..." text;
+    // it carries the request line and the SAME trace id the client saw.
     //
-    // The default sink is stderr. Every worker thread writes to stderr
-    // independently, so there is nothing to name and no shared state to race
-    // — that is what stderr is for. An application that wants structured logs
-    // sets options.error_logger; then the record goes there and stderr is
-    // left untouched, so espresso never writes to a program's stdout and a
-    // configured application keeps its own log shape. Recording is
-    // best-effort: a logging-backend failure must not fail a request whose
-    // response is already decided.
+    // Default sink: stderr, one line per failure — each worker thread writes
+    // independently, so nothing needs naming and nothing races. Set
+    // `options.error_logger` to route it through `std.log` instead; espresso
+    // then never touches stdout either way. Best-effort: a logging failure
+    // must not fail the request.
     fn record_failure(context: HttpContext, detail: string) {
         match self.options.error_logger {
             some(logger) => {
@@ -312,13 +294,12 @@ pub class WebApplication {
     }
 
     // Renders a failed pipeline into the context's response as problem+json,
-    // through the one detailed_errors gate. A 400 bad_request describes the
-    // client's own input, so it is shown as-is; every other failure — a 500,
-    // a contained panic among them — is a server internal, hidden behind the
-    // generic detail and the trace id in production. Shared by handle_context
-    // (a returned err) and the server's dispatch (a contained panic) so the
-    // two paths render the identical body and cannot drift apart again.
-    // Logging is the caller's job (record_failure), because only the
+    // through the one detailed_errors gate: a 400 bad_request is shown as-is
+    // (it describes the client's own input); everything else — a 500, a
+    // contained panic among them — is hidden behind the generic detail and
+    // the trace id in production. Shared by handle_context (a returned err)
+    // and the server's dispatch (a contained panic), so both paths render the
+    // identical body. Logging is the caller's job (record_failure): only the
     // hidden-detail case needs a record.
     fn write_failure(context: HttpContext,
                      detail: string, kind: string) -> Result<bool> {

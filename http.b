@@ -57,22 +57,19 @@ fn hex_value(byte: int) -> int {
     return -1
 }
 
-// Percent-decodes one component.
+// Percent-decodes one component. `in_body` says whether it came from a
+// request body rather than the request target, and decides two things.
 //
-// `in_body` says whether this component came out of a request body rather
-// than the request target, and it decides two things.
+// Control bytes are refused in a target (never legitimate, an attack
+// surface) but allowed in a body: a `<textarea>` posts its newlines as
+// `%0D%0A`, and refusing those would break every multi-line field on the
+// web. NUL is refused either way — nothing legitimate posts one, and it is
+// a terminator to half the software downstream. What a value carries is
+// refused later, at the boundary it could forge (a header, a Set-Cookie),
+// not here.
 //
-// Control bytes: in a target one is an attack surface and never legitimate,
-// so every one is refused. In a form body they are ordinary data — a
-// `<textarea>` posts its newlines as `%0D%0A`, and refusing those would break
-// every multi-line field on the web. NUL stays refused in both, because
-// nothing legitimate posts one and it is a terminator to half the software
-// downstream. What a value carries is then refused at the boundaries it could
-// forge — a header value, a Set-Cookie — which is where the grammar that
-// could be broken actually lives.
-//
-// And the noun in the refusal, so a message about a form field does not say
-// "request target".
+// The noun in the refusal matches the source, so a form-field message never
+// says "request target".
 fn decode_url_component(text: string,
                         plus_as_space: bool,
                         in_body: bool = false) -> Result<string> {
@@ -267,14 +264,13 @@ pub unique class HttpRequest {
         return ok(true)
     }
 
-    // Releases a body buffer that grew past `threshold`, so a connection that
-    // served one message larger than a single read does not keep that capacity
-    // for the rest of its life — resize(0) between requests frees no pages, so
-    // without this a keep-alive connection holds its largest body forever. A
-    // body at or below the threshold is left alone, so a steady small-request
-    // connection never reallocates; a steady large-request one pays one buffer
-    // per request, which its next reserve (from Content-Length) fills without
-    // regrowing.
+    // Releases a body buffer that grew past `threshold`, so a connection
+    // that served one large message does not keep that capacity forever —
+    // `resize(0)` frees no pages, so without this a keep-alive connection
+    // holds its largest body for life. Below the threshold nothing changes:
+    // a steady small-request connection never reallocates, and a steady
+    // large-request one pays one buffer per request, refilled by the next
+    // `Content-Length` reserve without regrowing.
     fn release_large_body(threshold: int) -> bool {
         if self.body.len() > threshold {
             self.body = new Bytes(0)
@@ -326,16 +322,15 @@ pub unique class HttpRequest {
         return self.route_values.get(name)
     }
 
-    /// The `application/x-www-form-urlencoded` body's fields, in order, parsed
-    /// on first use and cached for this request.
+    /// The `application/x-www-form-urlencoded` body's fields, in order,
+    /// parsed on first use and cached for this request.
     ///
-    /// It is the query-string grammar, read from the body instead of the
-    /// target, through the same parser — so a repeated name stays repeated and
-    /// `+` is a space in both. A request whose Content-Type is something else
-    /// is an error of kind `unsupported_media_type`, which answers 415: a
-    /// handler that asked for form fields and got JSON has been sent the wrong
-    /// thing, and answering with an empty field set would make that a silent
-    /// wrong answer instead.
+    /// Same grammar as the query string, through the same parser: a
+    /// repeated name stays repeated, and `+` is a space in both. A request
+    /// whose Content-Type is something else answers 415
+    /// (`unsupported_media_type`) rather than an empty field set — a
+    /// handler that asked for form fields and got JSON must not be told
+    /// silently that there were none.
     pub fn form() -> Result<QueryValues> {
         if self.form_ready { return ok(self.form_cache) }
         let declared: string = self.headers.get("Content-Type").or("")
@@ -374,16 +369,15 @@ pub unique class HttpRequest {
 
 /// A buffered HTTP response. The server owns Content-Length and Connection.
 ///
-/// The response holds the handler's payload by reference, not by copy: a
-/// `string` body is kept as the handler's own string (`body_text`) and a
-/// `Bytes` body is moved in (`body`). The server frames the head from the
-/// payload's length and either appends a small payload to its output queue or
-/// sends a large one beside the head with one vectored write — the payload
-/// never grows a per-connection buffer, which is what kept a megabyte alive on
-/// every connection before (see beans-lang/beans#140).
+/// The payload is held by reference, not copied: a `string` body stays the
+/// handler's own string (`body_text`); a `Bytes` body is moved in (`body`).
+/// The server frames the head from the payload's length, then either
+/// appends a small payload to its output queue or sends a large one beside
+/// the head with one vectored write, so the payload never grows a
+/// per-connection buffer (beans-lang/beans#140).
 ///
-/// `body` is the bytes-form payload and is empty when the payload is a string;
-/// `body_bytes()` returns the payload as bytes regardless of form.
+/// `body` is the bytes-form payload, empty when the payload is a string;
+/// `body_bytes()` returns it as bytes regardless of form.
 pub unique class HttpResponse {
     pub status: int = 200
     pub reason: string = "OK"
@@ -430,23 +424,20 @@ pub unique class HttpResponse {
     /// Adds one `Set-Cookie` header, refusing anything that would forge the
     /// header's own structure.
     ///
-    /// A cookie name or value carrying `;` writes an attribute the caller
-    /// never asked for, and one carrying CR or LF splices whole headers into
-    /// the response, so both are refused here — at the call that names the
-    /// cookie, and before anything is serialized. The refusal is a program
-    /// error (kind `cookie`), not a client one: it says which cookie and what
-    /// about it, and the request answers 500 with the detail in the server
-    /// log rather than shipping a broken response.
+    /// A `;` in the name or value writes an attribute the caller never
+    /// asked for; a CR or LF splices whole headers into the response. Both
+    /// are refused here, before serialization — a program error (kind
+    /// `cookie`) naming the cookie and the problem, answered as a 500 with
+    /// the detail in the server log rather than a broken response shipped.
     ///
     /// Called more than once it adds more than one header, which is how
     /// several cookies are set; a response carrying a cookie is never framed
     /// from this connection's cached head.
     ///
-    /// The attributes are always passed, never defaulted at this call: a
+    /// Attributes are always passed explicitly, never defaulted here: a
     /// `new CookieOptions()` already carries the safe set (path `/`,
-    /// `HttpOnly`, `Secure`, `SameSite=Lax`, session lifetime), and writing it
-    /// out is what makes a deliberate `secure = false` on a development server
-    /// visible in the code that chose it.
+    /// `HttpOnly`, `Secure`, `SameSite=Lax`, session lifetime), so a
+    /// deliberate `secure = false` stays visible in the code that chose it.
     pub fn set_cookie(name: string,
                       value: string,
                       options: CookieOptions) -> Result<bool> {
@@ -610,23 +601,23 @@ pub class HttpContext {
     /// Begins a streamed response: sends the head now, and returns a writer
     /// that frames each chunk as it is written.
     ///
-    /// Use it when the body's length is not known when the head must go out.
-    /// The buffered path — return an `ActionResult` and let the router execute
-    /// it — stays the default and is faster for everything that fits in
-    /// memory; this one exists for the response that does not.
+    /// Use it when the body's length is not known when the head must go
+    /// out. The buffered path (return an `ActionResult`) stays the default
+    /// and is faster for anything that fits in memory; this is for what
+    /// doesn't.
     ///
     /// The head carries `Transfer-Encoding: chunked`, this request's Date,
-    /// the application's `Server` header if one is configured, `content_type`
-    /// unless the handler already set a Content-Type, and every header the
-    /// handler added through `context.response.header(...)` before this call.
-    /// Headers added afterwards go nowhere: the head is already on the wire.
+    /// the `Server` header if configured, `content_type` unless the handler
+    /// already set one, and every header added through
+    /// `context.response.header(...)` **before** this call — headers added
+    /// after go nowhere, the head is already on the wire.
     ///
-    /// The handler should call `finish()` when the body is complete. If it
-    /// returns without doing so the connection finishes the body for it. If it
-    /// returns an error instead, the body is deliberately left unterminated
-    /// and the connection closes — a truncated chunked message is how HTTP
-    /// says "this response is broken", and it is the only signal left once the
-    /// head has gone out.
+    /// Call `finish()` when the body is complete. A handler that returns
+    /// without doing so gets the terminator written for it; one that
+    /// returns an **error** instead leaves the body deliberately
+    /// unterminated and closes the connection — a truncated chunked message
+    /// is how HTTP signals a broken response, and it's the only signal left
+    /// once the head is on the wire.
     pub fn begin_stream(status: int,
                         content_type: string) -> Result<ResponseStream> {
         if self.deferred {

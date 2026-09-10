@@ -1,11 +1,10 @@
-// Streamed responses: a head that goes out before the body exists, and a body
-// written as chunks.
+// Streamed responses: the head goes out before the body exists, and the
+// body is written as chunks.
 //
-// The buffered path stays the default and the fast path. A handler that
-// returns an ActionResult never touches anything here; this is the second
-// mode, and it exists for a response whose length is not known when the head
-// must be sent — a page rendered in pieces, a report generated as it is
-// written, a feed that never ends.
+// The buffered path stays the default: a handler that returns an
+// `ActionResult` never touches this. This second mode is for a response
+// whose length is not known when the head must go out — a page rendered in
+// pieces, a report generated as it is written, a feed that never ends.
 package espresso
 
 import std.http
@@ -34,15 +33,15 @@ fn append_hex(target: Bytes, value: int) {
 /// The writer `context.begin_stream()` returns: one chunk per `write`, and a
 /// terminator when the response ends.
 ///
-/// The payload is never copied. A chunk goes out as one vectored write of its
-/// size line and the caller's own bytes, and the CRLF that closes a chunk
-/// rides the front of the next chunk's size line — so a chunk costs exactly
-/// one write, whatever its size, and a megabyte written here is a megabyte
-/// read straight out of the caller's buffer.
+/// The payload is never copied. A chunk is one vectored write of its size
+/// line and the caller's own bytes; the CRLF that closes a chunk rides the
+/// front of the next chunk's size line, so a chunk costs exactly one write
+/// whatever its size — a megabyte written here is a megabyte read straight
+/// out of the caller's buffer.
 ///
-/// Backpressure parks the connection fiber inside that write, the same way a
-/// buffered flush does and through the same loop: a slow client costs one
-/// parked fiber and nothing else on the worker.
+/// Backpressure parks the connection fiber inside that write, through the
+/// same loop a buffered flush uses: a slow client costs one parked fiber and
+/// nothing else on the worker.
 pub class ResponseStream {
     io: ConnectionIo
     // A HEAD response carries the head of the GET response and no body at
@@ -149,17 +148,16 @@ pub class ResponseStream {
 
 // Frames a streamed response's head into `target`.
 //
-// `encode_response_head_append` cannot write this head: it always emits a
-// Content-Length, and it refuses a caller-supplied Transfer-Encoding outright
-// (`respond owns HTTP framing`). It is still what validates the head, on a
-// scratch buffer whose bytes are thrown away — the status range, the reason
-// phrase, every header name as a token, every header value free of CR, LF and
-// NUL, and the refusal of a caller-supplied Content-Length, Transfer-Encoding
-// or Connection. Doing it that way keeps one copy of those rules, in std.http,
-// and means a rule tightened there tightens here on the next release rather
-// than drifting.
+// `encode_response_head_append` cannot write this head itself — it always
+// emits a Content-Length and refuses a caller-supplied Transfer-Encoding
+// outright (`respond owns HTTP framing`) — but it is still what validates
+// the head, on a scratch buffer whose bytes are thrown away: status range,
+// reason phrase, every header name as a token, every value free of CR, LF
+// and NUL, and the refusal of a caller-supplied Content-Length,
+// Transfer-Encoding or Connection. That keeps one copy of those rules in
+// std.http, so a rule tightened there tightens here too.
 //
-// It also reports which statuses forbid a body, which is exactly the set that
+// It also reports which statuses forbid a body — exactly the set that
 // cannot be streamed.
 fn write_stream_head(target: Bytes,
                      status: int,

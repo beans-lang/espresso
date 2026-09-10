@@ -36,6 +36,25 @@ fn main() {
 For a real application — stores behind interfaces, auth policies,
 validation, a rendered dashboard — read `examples/taskhub/main.b`.
 
+## Requirements
+
+Beans 0.1.40 or newer. The server's large-body send path calls three
+`std.http`/`std.net` entry points that first ship in that release — see
+*Versioning* below for specifics and what an older toolchain does instead.
+
+## Install
+
+Espresso is a `beans.pot` library, required by path — the same way this
+repository itself requires [barista](https://github.com/beans-lang/barista):
+
+```
+require path "../../community-libs/espresso"
+```
+
+That line is enough to `import espresso`; barista comes along with it
+transitively. Add your own `require path "../../community-libs/barista"` only
+if your own source names a barista type directly — see *Services* below.
+
 ## Controllers
 
 A controller is a class marked `@espresso.controller(route: prefix)`.
@@ -117,11 +136,43 @@ win over the controller's.
 - `@espresso.limit(rpm: 120)` fixed-window rate limit per worker;
   answers 429 with a `Retry-After` header.
 
+## Routing
+
+A handler can also be mapped directly on the application, with no
+controller — `app.get(pattern, handler)`, `.post`, `.put`, `.patch`,
+`.delete`, or the generic `app.map(method, pattern, handler)`. This is what a
+controller's own verb annotations compile down to.
+
+```beans
+fn item(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
+    return espresso.text(context.request.route("id").or("missing"))
+}
+
+app.get(r"/items/{id}", item)?
+```
+
+A pattern is `/`-separated literal segments, `{name}` parameters, and one
+trailing `{*name}` catch-all that captures the rest of the path joined by
+`/`. Read a captured value with `context.request.route(name)`.
+
+Two routes conflict at map time only when they share a method and the same
+*shape* — the same sequence of literal, parameter and catch-all segments,
+with matching literal text; parameter names don't matter, so `/a/{id}` and
+`/a/{key}` collide but `/a/{id}` and `/a/literal` do not. Among routes that do
+coexist, a request picks the most specific match: literal segments beat
+parameters, which beat a catch-all, independent of registration order.
+
+`HEAD` on a mapped `GET` runs the same handler; `OPTIONS` on a path that has
+routes answers with an `Allow` header instead of reaching a handler. A path
+with no match answers 404; a path that matches but not the method answers
+405 with `Allow` — both as problem+json.
+
 ## Services
 
-The container is [barista](../barista), its own package. Espresso requires it,
-so an application that uses espresso gets it; name a barista type in your own
-source and add `require path` for it as well.
+The container is [barista](https://github.com/beans-lang/barista), its own
+package. Espresso requires it, so an application that uses espresso gets it;
+name a barista type in your own source and add `require path` for it as
+well.
 
 Registration is generic and typed; lifetimes are transient, scoped and
 singleton. `resolve` is a method on any provider or scope.
@@ -166,9 +217,8 @@ drop the annotation from one and register your choice explicitly. A
 language `singleton class` cannot be container-activated and is refused
 at scan time; register its `.instance` through a factory instead.
 `@controller` classes are already scoped services and refuse a second
-`@service` marking — that last refusal is the only thing
-`espresso.add_services` adds over `barista.add_services`, and it is why the
-wrapper exists.
+`@service` marking — the only thing `espresso.add_services` adds over
+`barista.add_services`, and why it exists.
 
 A request scope is opened before the middleware pipeline and released after
 the response, so a `scoped` service is one instance per request. A service that
@@ -237,11 +287,10 @@ repeated names stay repeated, and `a&b=2` gives `a` an empty value.
 
 Two things differ from a query string, because a body is not a URL. A control
 byte is data here, so a `<textarea>`'s `%0D%0A` decodes to a newline instead
-of being refused; NUL stays refused in both. And a request whose Content-Type
-is not that media type is an error of kind `unsupported_media_type`, which
-answers **415** — a handler that asked for form fields and got JSON was sent
-the wrong thing, and answering with an empty field set would turn that into a
-silent wrong answer.
+of being refused; NUL stays refused in both. A request whose Content-Type is
+not that media type answers **415** (`unsupported_media_type`) rather than an
+empty field set — a handler that asked for form fields and got JSON must not
+be told silently that there were none.
 
 ## Multipart bodies
 
@@ -489,6 +538,17 @@ upgrade endpoint links no WebSocket bridge.
 `espresso.Configuration` layers defaults, files and `--key=value`
 arguments; `espresso.configure_server` fills `ServerOptions` from the
 `server:` section.
+
+## Tests
+
+```sh
+./test.sh            # interpreter + cross-target checks
+./test.sh --native   # adds the native backend and the resident-memory gates
+```
+
+Every case's expected output is a golden file under `tests/`; both backends
+must match it byte for byte. See *Versioning* below to point the suite at a
+Beans checkout instead of an install.
 
 ## Versioning
 

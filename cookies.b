@@ -1,15 +1,12 @@
-// Cookies: reading the request's `Cookie` header, and building a `Set-Cookie`
-// value that cannot be forged from its own inputs.
+// Cookies: reading the request's `Cookie` header, and building a
+// `Set-Cookie` value that cannot be forged from its own inputs.
 //
-// The write side is the part that matters. A `Set-Cookie` value is a
-// semicolon-separated list, so a name or a value carrying `;` writes an
-// attribute the caller never asked for — `Secure` off, `Path=/`, a second
-// cookie — and a value carrying CR or LF splices whole headers into the
-// response. Both are refused here, at the call that sets the cookie and names
-// the cookie, rather than later by the response encoder naming a header block.
-// `http.field_is_safe` is the CR/LF/NUL rule std.http already applies to every
-// field it writes; this file adds the cookie grammar on top of it and does not
-// restate it.
+// A `Set-Cookie` value is a semicolon-separated list, so a name or value
+// carrying `;` writes an attribute the caller never asked for (`Secure`
+// off, `Path=/`, a second cookie), and CR or LF splices whole headers into
+// the response — both refused here, at the call, not later by the encoder.
+// `http.field_is_safe` is std.http's own CR/LF/NUL rule; this file adds the
+// cookie grammar on top and does not restate it.
 package espresso
 
 import std.http
@@ -32,14 +29,13 @@ pub enum SameSite {
 }
 
 /// The attributes of one `Set-Cookie`, with safe defaults: path `/`,
-/// `HttpOnly`, `Secure`, `SameSite=Lax`, and no `Max-Age` (a session cookie
-/// the browser drops when it closes).
+/// `HttpOnly`, `Secure`, `SameSite=Lax`, and no `Max-Age` (a session cookie,
+/// dropped when the browser closes).
 ///
-/// `secure` defaults to **true**. A plain-http development server must set it
-/// to false: Chrome and Firefox accept a `Secure` cookie from
-/// `http://localhost`, Safari does not, and a cookie a browser drops is a
-/// login that silently never happens. Defaulting the other way would ship the
-/// insecure choice to everyone who never thought about it.
+/// `secure` defaults to **true**. Chrome and Firefox accept a `Secure`
+/// cookie from `http://localhost`; Safari does not — so a plain-http dev
+/// server must turn it off on purpose, and a cookie the browser drops is a
+/// login that silently never happens.
 pub class CookieOptions {
     /// The path prefix the cookie is sent for. `""` omits the attribute,
     /// which makes the browser scope it to the current directory — almost
@@ -164,18 +160,15 @@ pub fn set_cookie_value(name: string,
     return ok("{built}; SameSite={same_site_text(options.same_site)}")
 }
 
-// Folds every `Cookie` header of a request into `target`, in the order the
-// client sent them.
+// Folds every `Cookie` header of a request into `target`, in arrival order.
 //
-// RFC 6265 §5.4 says a client sends one `Cookie` header, but HTTP/2 permits
-// splitting it and proxies do rejoin it, so every occurrence is read. A piece
-// with no `=`, or with an empty name, is skipped rather than guessed at — the
-// permissive read every server does, and the only one under which a lookup by
-// name means anything.
+// RFC 6265 §5.4 expects one `Cookie` header, but HTTP/2 permits splitting it
+// and proxies rejoin it, so every occurrence is read. A piece with no `=`,
+// or an empty name, is skipped rather than guessed at.
 //
-// Nothing is decoded. A cookie value is opaque bytes to RFC 6265; percent-
-// decoding it here would corrupt any value that legitimately contains `%`,
-// and it would break the round trip `set_cookie` promises.
+// Nothing is decoded: a cookie value is opaque bytes under RFC 6265, and
+// percent-decoding here would corrupt any value that legitimately contains
+// `%` and break the round trip `set_cookie` promises.
 fn parse_cookies_into(headers: http.Headers, target: QueryValues) {
     target.clear()
     for header: string in headers.all("Cookie") {

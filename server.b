@@ -58,20 +58,18 @@ pub class ServerOptions {
     /// The most framed response bytes a connection may hold in its output
     /// queue before it pushes them to the peer.
     ///
-    /// One read can carry many pipelined requests, and every response in that
-    /// batch is framed before the read loop reaches its flush; without a bound
-    /// the queue grows to the whole batch and keeps that memory for the life of
-    /// the connection, so a client turns a few kilobytes of pipelined requests
-    /// into megabytes of per-connection buffer. Reaching the bound flushes what
-    /// is queued before the next response is framed, which costs one extra
-    /// write per bound-worth of output and changes nothing a client can see:
-    /// the queue only ever ends on a response boundary, so responses keep their
-    /// pipelined order.
+    /// One read can carry many pipelined requests, all framed before the
+    /// read loop's flush; unbounded, the queue grows to the whole batch and
+    /// keeps that memory for the connection's life — a client turns a few
+    /// kilobytes of requests into megabytes of buffer. Reaching the bound
+    /// flushes early instead: one extra write per bound-worth of output,
+    /// invisible to the client since the queue only ever ends on a response
+    /// boundary, so pipelined order holds.
     ///
-    /// The default is one read buffer's worth — 64 KiB, some five hundred small
-    /// responses, so batching survives everywhere it pays — and at four times
-    /// `vectored_body_min` it is also the point past which a batch of bodies too
-    /// small to send beside their heads is worth a write of its own.
+    /// Default: one read buffer's worth, 64 KiB (~500 small responses, so
+    /// batching still pays off), and four times `vectored_body_min` — the
+    /// point past which a batch of small bodies is worth a write of its
+    /// own.
     pub max_queued_output_bytes: int = 65536
     pub max_requests_per_connection: int = 1000000
     pub max_header_count: int = 128
@@ -181,21 +179,19 @@ fn find_bytes(haystack: Bytes, needle: string, start: int) -> int {
     return -1
 }
 
-// A per-connection cache of one response head, so a connection answering the
-// same shape repeatedly frames the head by copying two spans and patching the
-// Date, instead of re-validating the headers and rebuilding the head line by
-// line each response.
+// A per-connection cache of one response head: a connection answering the
+// same shape repeatedly frames it by copying two spans and patching the
+// Date, instead of re-validating headers and rebuilding the head each time.
 //
-// The cached bytes are std.http's own: the entry is built by calling
-// http.encode_response_head_append with a body length of 0, so the head is
-// byte-for-byte what the plain path produces. Only two spans vary between
-// responses of one shape — the Content-Length digits and the 29-byte
-// IMF-fixdate Date value — and both are located once, at build time, by
-// searching the produced bytes. If std.http ever changes its head layout, the
-// entry is rebuilt from std.http and the bytes stay identical by construction;
-// only the two build-time searches would need to still find their substrings,
-// and a miss there simply declines the cache and the plain path frames the
-// response.
+// The cached bytes are std.http's own — built by calling
+// `encode_response_head_append` with body length 0 — so the head is
+// byte-for-byte what the plain path produces, by construction. Only two
+// spans vary between responses of one shape (the Content-Length digits and
+// the 29-byte IMF-fixdate Date), located once at build time by searching
+// the produced bytes. If std.http ever changes its head layout, the cache
+// rebuilds and stays identical automatically; the only risk is the two
+// build-time searches missing their substrings, which simply declines the
+// cache and falls back to the plain path.
 pub class ResponseHeadCache {
     valid: bool = false
     key_status: int = 0
@@ -363,28 +359,25 @@ fn shielded_upgrade(handler: UpgradeHandler,
     }
 }
 
-// One connection's whole life, owned by one fiber. Reads park in the
-// netpoller, writes flush inline, and a deferred request waits right here
-// in request order — the old pause/replay machinery is simply the fiber's
-// program counter now.
-// Everything a response is written through: the socket, and the queue in
-// front of it.
+// One connection's whole life is owned by one fiber: reads park in the
+// netpoller, writes flush inline, and a deferred request waits right here in
+// request order.
 //
-// It is a class of its own, and an ordinary aliasable one, because a streamed
-// response is written by the handler's own fiber through
-// `context.begin_stream()` — and the handler cannot reach a `unique`
-// ServerConnection. The connection and the stream writer therefore speak to
-// the same socket and the same queue, so the ordering rule that keeps
-// pipelined responses in order stays one rule instead of two.
+// `ConnectionIo` is everything a response is written through: the socket
+// and the queue in front of it. It is its own class, ordinary and
+// aliasable, because a streamed response is written by the handler's own
+// fiber through `context.begin_stream()`, and a handler cannot reach a
+// `unique` ServerConnection. The connection and the stream writer therefore
+// share one socket and one queue, so the ordering rule that keeps
+// pipelined responses in order is one rule, not two.
 class ConnectionIo {
-    // The socket, parked in a one-slot list rather than held in a plain
-    // field. A field of a move-only type cannot be moved out — the language
-    // says so and names the way around it: "field and index moves need
-    // consuming accessors such as List `remove`" (beans spec/SYNTAX.md) — and
-    // an upgrade endpoint is handed the socket by value, for keeps. `remove`
-    // yields the stream and leaves the list empty, which is also the flag:
-    // an empty list means this connection no longer owns anything to read,
-    // write or close.
+    // The socket, parked in a one-slot list rather than a plain field. A
+    // field of a move-only type cannot be moved out of — the language names
+    // the way around it: "field and index moves need consuming accessors
+    // such as List `remove`" (beans spec/SYNTAX.md) — and an upgrade
+    // endpoint takes the socket by value, for keeps. `remove` yields the
+    // stream and empties the list, which doubles as the flag: empty means
+    // this connection no longer owns anything to read, write or close.
     socket: List<net.TcpStream> = []
     output: Bytes = new Bytes(0)
     // options.max_queued_output_bytes, held here because every flush consults
@@ -429,20 +422,17 @@ class ConnectionIo {
         return self.socket[0].read_into_waiting(buffer)
     }
 
-    // The RFC 9110 Date value for a response framed right now, as
-    // IMF-fixdate in GMT — the only form a sender is allowed to generate.
-    // Espresso is an origin server with a clock, so it MUST send Date on
-    // 2xx/3xx/4xx and MAY on 1xx/5xx; it emits no 1xx, so "stamp it on every
-    // response" is the simplest rule that is correct on every status it
-    // produces, and append_response/append_error/begin_stream apply it at the
-    // one layer that reaches a socket.
+    // The RFC 9110 Date value for a response framed right now, as IMF-fixdate
+    // in GMT — the only form a sender may generate. Espresso MUST send it on
+    // 2xx/3xx/4xx and MAY on 1xx/5xx; since it emits no 1xx, stamping every
+    // response is the simplest rule that's correct everywhere, applied at
+    // the one layer that reaches a socket (append_response/append_error/
+    // begin_stream).
     //
-    // Formatting is once-per-second work — a civil-time conversion and a few
-    // string allocations — so the text is cached and reused for every
-    // response that lands in the same wall-clock second. The wall clock is
-    // read once per response (a vDSO clock_gettime, cheap beside the format it
-    // guards), so the value is never stale: a response that crosses a second
-    // boundary reformats before it is sent.
+    // Formatting — a civil-time conversion plus allocations — is cached and
+    // reused per wall-clock second. The clock is still read once per
+    // response (a cheap vDSO `clock_gettime`), so the value is never stale:
+    // a response crossing a second boundary reformats before it sends.
     fn http_date() -> string {
         let now_ns: int = time.wall_nanos()
         var second: int = now_ns / 1000000000
@@ -456,18 +446,16 @@ class ConnectionIo {
         return self.date_text
     }
 
-    // Ends a flush: the queue is empty again, and the buffer that carried it
-    // is kept only while it is no larger than the connection is allowed to
-    // queue.
+    // Ends a flush: the queue is empty again, and its buffer is kept only if
+    // it is no larger than the connection is allowed to queue.
     //
-    // `resize(0)` frees no pages, so a queue that outgrew the bound would
-    // otherwise hold that memory for the rest of the connection's life — the
-    // same trap `release_large_body` closes on the request body. The bound
-    // keeps the ordinary connection under it, so an ordinary connection never
-    // reallocates and keeps every bit of the buffer reuse that makes small
-    // pipelined responses cheap; the one that did outgrow it — a batch framed
-    // past the bound, or a single response with an outsized head — pays one
-    // allocation and hands the memory back.
+    // `resize(0)` frees no pages, so an unbounded queue would hold that
+    // memory for the connection's life — the same trap `release_large_body`
+    // closes on the request body. An ordinary connection stays under the
+    // bound and never reallocates, keeping the buffer reuse that makes small
+    // pipelined responses cheap; the rare one that outgrows it — a batch
+    // past the bound, or one oversized head — pays one allocation and hands
+    // the memory back.
     fn finish_flush() {
         let sent: int = self.output.len()
         if sent > self.stats.output_queue_peak {
@@ -505,15 +493,14 @@ class ConnectionIo {
         return ok(true)
     }
 
-    // The two-buffer write loop: a head and the payload behind it, sent as
-    // one pair without the payload ever entering a buffer. Everything that
-    // sends a body beside its head uses it — a large buffered response, and
-    // every streamed chunk — so the short-write retry and the backpressure
-    // park are one rule here too.
+    // The two-buffer write loop: a head and its payload sent as one pair,
+    // the payload never entering a buffer. Every body-beside-head send uses
+    // it — a large buffered response, every streamed chunk — so the
+    // short-write retry and the backpressure park are one rule, not two.
     //
-    // The head goes in front of the payload in the same write, which is what
-    // keeps pipelined responses in order by construction: the payload cannot
-    // overtake what was framed before it, and nothing can be framed behind it
+    // The head goes out in front of the payload in the same write, which
+    // keeps pipelined responses in order by construction: nothing framed
+    // before this can be overtaken, and nothing behind it can be framed
     // until this returns.
     fn push_pair(head: Bytes, body: Bytes) -> Result<bool> {
         if !self.owns_socket() { return err(handed_off_detail, "upgraded") }
@@ -887,15 +874,15 @@ unique class ServerConnection {
                         }
                     }
                     err(problem) => {
-                        // Every failure that reaches the shield's join — a
+                        // Every failure reaching the shield's join — a
                         // contained panic, or an error handle_context could
-                        // not render itself — is a server-side event worth a
-                        // record, deferred or not. Log it once here, with the
-                        // trace id the client will see, before the response is
-                        // decided. This is the record the generic production
-                        // message promises; without it a panic vanished
-                        // silently (RequestLog runs inside the pipeline, which
-                        // a panic unwinds straight past).
+                        // not render — is worth a record, deferred or not.
+                        // Log it once here, with the trace id the client
+                        // will see, before the response is decided: this is
+                        // the record the generic production message
+                        // promises. RequestLog cannot fill this role — it
+                        // runs inside the pipeline, which a panic unwinds
+                        // straight past.
                         app.record_failure(active, problem.msg)
                         if active.is_streaming() {
                             // The head is on the wire and the body is
@@ -915,38 +902,36 @@ unique class ServerConnection {
                             self.await_completion(
                                 active, app, options, stats)?
                         } else {
-                            // Connection policy: a handler error — a returned
-                            // `err`, or a contained panic surfacing at the
-                            // shield's join — is fatal to the connection.
-                            // append_response is told keep_alive=false, so this
-                            // response is the connection's last and it closes
-                            // afterwards. That is deliberate: it bounds
-                            // anything a half-finished request left on the
-                            // reused HttpContext — and anything a panic would
-                            // strand on a platform without the runtime unwind
-                            // (Windows; see README) — to this one connection
-                            // instead of letting the next request inherit it.
+                            // Connection policy: a handler error (a returned
+                            // `err`, or a contained panic at the shield's
+                            // join) is fatal to the connection —
+                            // append_response is told keep_alive=false, so
+                            // this is the connection's last response and it
+                            // closes after. Deliberate: it bounds anything a
+                            // half-finished request left on the reused
+                            // HttpContext, and anything a panic would strand
+                            // on a platform without the runtime unwind
+                            // (Windows; see README), to this one connection
+                            // rather than the next request inheriting it.
                             //
-                            // Reclaim the request's DI scope first, best-effort
-                            // on purpose: close() is idempotent and only errors
-                            // when the scope was already released (so nothing
-                            // leaks), and the error response below must still
-                            // be framed — a close failure must not short-
-                            // circuit past it. Surface a failure in the stats
-                            // rather than swallow it.
+                            // Reclaim the DI scope first, best-effort on
+                            // purpose: `close()` is idempotent and only
+                            // errors when the scope was already released, so
+                            // nothing leaks. The error response below must
+                            // still be framed even if this fails — surfaced
+                            // in the stats, not swallowed.
                             match active.close() {
                                 ok(_) => {}
                                 err(_) => { stats.connection_errors += 1 }
                             }
-                            // A contained panic leaves the response half-
-                            // written at best, so start from a clean slate and
+                            // A contained panic leaves the response
+                            // half-written at best, so start clean and
                             // render through the SAME gate and problem+json
-                            // shape the returned-err path uses (write_failure):
-                            // production answers the generic detail plus the
-                            // trace id, detailed_errors answers the panic text.
-                            // Never the bare panic message and never the
-                            // "runtime panic at L:C" position the old
-                            // append_error wrote straight to the wire.
+                            // shape the returned-err path uses
+                            // (write_failure): production shows the generic
+                            // detail and trace id, detailed_errors shows the
+                            // panic text — never the bare panic message or
+                            // its "runtime panic at L:C" source position.
                             active.response.reset()
                             app.write_failure(
                                 active, problem.msg, problem.kind)?
@@ -1027,12 +1012,12 @@ unique class ServerConnection {
                                 // Reserve the body to its declared length so
                                 // the pieces that follow fill one allocation
                                 // instead of regrowing it — a 101 KB body
-                                // arriving through a 64 KB read buffer regrows
-                                // once per request otherwise. Bounded by
-                                // max_body, which the body loop enforces
-                                // anyway, so a lying Content-Length can never
-                                // reserve more than a real body could; a
-                                // chunked or bodyless message declares -1 and
+                                // through a 64 KB read buffer regrows once
+                                // per request otherwise. Bounded by
+                                // `max_body` (which the body loop enforces
+                                // anyway), so a lying Content-Length can
+                                // never reserve more than a real body could;
+                                // chunked or bodyless declares -1 and
                                 // reserves nothing.
                                 let declared: int = request.content_length
                                 if declared > 0 && declared <= self.max_body {
@@ -1120,14 +1105,13 @@ unique class ServerConnection {
 
     // A client that asked to switch protocols. The parser is finished with
     // this connection either way — whatever follows the head belongs to the
-    // next protocol — so there is no path back to serving ordinary requests
-    // from here, and every branch below ends the loop.
+    // next protocol — so every branch below ends the loop.
     //
-    // The pipeline runs first, exactly as it does for a request: an upgrade
-    // that skipped it would skip authentication, the session cookie and the
-    // `Origin` check, which is precisely the set of checks a cross-site
-    // WebSocket hijack needs skipped. Only after a layer has let the request
-    // through, and only if an upgrade endpoint matched, does the socket move.
+    // The pipeline runs first, exactly as for an ordinary request: skipping
+    // it would skip authentication, the session cookie and the `Origin`
+    // check — precisely what a cross-site WebSocket hijack needs skipped.
+    // The socket moves only after a layer lets the request through and an
+    // upgrade endpoint matched.
     fn hand_off_protocol(head: http.Request,
                          remainder: Bytes,
                          app: WebApplication,
@@ -1234,18 +1218,16 @@ unique class ServerConnection {
                 self.events[position], app, options, stats)?
             if !proceed { return ok(false) }
             if self.close_after_write { return ok(false) }
-            // One read can carry hundreds of pipelined requests, and every
-            // response in the batch is framed here before the read loop
-            // reaches its flush. Without this the queue grows to hold the
-            // whole batch — a client turns 13 KB of pipelined requests into
-            // megabytes of per-connection buffer — so push it once it has
-            // reached what this connection is allowed to hold.
+            // One read can carry hundreds of pipelined requests, all framed
+            // here before the read loop's flush. Unbounded, the queue grows
+            // to the whole batch — 13 KB of pipelined requests can become
+            // megabytes of per-connection buffer — so push it once it
+            // reaches what this connection is allowed to hold.
             //
             // An event is absorbed whole, so the queue always ends on a
-            // response boundary here: what goes out is complete responses in
-            // the order they were framed, and the next one cannot be framed
-            // until this returns. Ordering is the same guarantee
-            // flush_with_body relies on.
+            // response boundary: complete responses, in framed order, and
+            // the next cannot be framed until this returns — the same
+            // ordering guarantee `flush_with_body` relies on.
             if self.io.output.len() >= self.io.max_queued {
                 stats.output_queue_flushes += 1
                 self.io.flush()?

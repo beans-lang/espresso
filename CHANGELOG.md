@@ -6,12 +6,14 @@ This file records user-facing changes in each Espresso release.
 
 ### Changed — BREAKING: the DI container moved out
 
-- **`di.b` is now the [barista](../barista) package.** A container is not a web
-  framework's business: latte wants one for its pages and view-models, and a
-  desktop toolkit would want the same one without taking an HTTP server with
-  it. Espresso `require`s barista, so an application that uses espresso gets
-  the container; an application that names a barista type in its **own** source
-  adds `require path "../../community-libs/barista"` too.
+- **`di.b` is now the
+  [barista](https://github.com/beans-lang/barista) package.** A container is
+  not a web framework's business: latte wants one for its pages and
+  view-models, and a desktop toolkit would want the same one without taking
+  an HTTP server with it. Espresso `require`s barista, so an application
+  that uses espresso gets the container; an application that names a
+  barista type in its **own** source adds
+  `require path "../../community-libs/barista"` too.
 
   Espresso's names for those types are **gone, not aliased**. Two names for one
   type is two things to keep in step, and a shim has to be maintained for as
@@ -352,8 +354,6 @@ measured 95x slower.
   levels, structured fields and an exportable reader. One deliberate
   loss: there is no callback sink — user code never runs inside the
   logger, by `std.log` design.
-
-## Unreleased
 
 ## [0.1.0] - 2026-08-22
 
