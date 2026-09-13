@@ -1,0 +1,13 @@
+# GitHub does not know Beans, and `.b` is claimed by three languages it does
+# know — B, Brainfuck and Limbo — so Linguist classifies each file by guess and
+# splits one codebase across all three. `linguist-language=Beans` cannot fix
+# that: an override is only honoured for a language already in Linguist's list,
+# and the bar for adding one is 2000+ files indexed across many unrelated public
+# repositories.
+#
+# So highlight as Swift, the closest language GitHub does know — it shares
+# class, let, var, init, override, import, enum, struct, self, super and
+# @annotations — and keep the guesses out of the repository language bar
+# altogether, rather than trade one wrong answer for another.
+*.b  linguist-language=Swift linguist-detectable=false
+*.bx linguist-language=Swift linguist-detectable=false
