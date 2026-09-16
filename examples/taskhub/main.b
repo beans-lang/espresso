@@ -22,7 +22,7 @@
 //   GET    /openapi.json                 the route table
 package main
 
-import barista
+import github.com/beans-lang/barista
 import espresso
 import std.encoding.json
 import std.http

@@ -1,6 +1,6 @@
 package espresso
 
-import barista
+import github.com/beans-lang/barista
 
 import std.http
 import std.io

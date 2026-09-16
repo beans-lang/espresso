@@ -9,7 +9,7 @@
 // ActionResult back to the router.
 package espresso
 
-import barista
+import github.com/beans-lang/barista
 
 import std.encoding.json
 import std.reflect

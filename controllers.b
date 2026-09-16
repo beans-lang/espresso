@@ -6,7 +6,7 @@
 // — so a request runs with no metadata lookups.
 package espresso
 
-import barista
+import github.com/beans-lang/barista
 
 import std.reflect
 

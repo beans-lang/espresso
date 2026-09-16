@@ -2,7 +2,33 @@
 
 This file records user-facing changes in each Espresso release.
 
-## [Unreleased]
+## [0.3.0] - 2026-09-16
+
+`0.2.0` was written up on 2026-08-22 and never tagged. Its changes are below,
+under their own headings, and ship here.
+
+### Changed — BREAKING: espresso is required from git, not by path
+
+**`require path "../../community-libs/espresso"` is gone.** It named a
+directory in this workspace, which meant espresso could not be built by anyone
+outside it — a consumer who followed the README got six errors about an unknown
+package `barista`, because this repository's own manifest pointed at a sibling
+directory that was not in their tree.
+
+```beans-pot
+require github.com/beans-lang/espresso v0.3.0
+```
+
+```beans
+import github.com/beans-lang/espresso
+```
+
+The binding is still `espresso`: a package is named by the manifest that
+declares it, never by the path that reached it. Barista comes along
+transitively, and a project that names a barista type in its own source adds
+`require github.com/beans-lang/barista v0.1.1` — at the same ref this manifest
+pins, because a dependency required at two refs anywhere in the graph is an
+error.
 
 ### Changed — BREAKING: the DI container moved out
 
@@ -263,7 +289,7 @@ This file records user-facing changes in each Espresso release.
 - `IntakeQueue`, `WebServer.set_intake`, and `LoopMailbox` — acceptor
   plumbing of the old event loop with no fiber-engine counterpart.
 
-## [0.2.0] - 2026-08-22
+## [0.2.0] - 2026-08-22 — never tagged; shipped in 0.3.0
 
 ### Added (post-tag)
 

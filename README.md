@@ -7,7 +7,7 @@ and a fast server underneath. Everything below compiles and runs from
 `tests/docs.b` — a README line that does not compile fails the build.
 
 ```beans
-import espresso
+import github.com/beans-lang/espresso
 
 @espresso.controller(route: "/hello")
 pub class HelloController extends espresso.Controller {
@@ -44,16 +44,15 @@ Beans 0.1.40 or newer. The server's large-body send path calls three
 
 ## Install
 
-Espresso is a `beans.pot` library, required by path — the same way this
-repository itself requires [barista](https://github.com/beans-lang/barista):
-
 ```
-require path "../../community-libs/espresso"
+beansc pot add github.com/beans-lang/espresso v0.3.0
 ```
 
-That line is enough to `import espresso`; barista comes along with it
-transitively. Add your own `require path "../../community-libs/barista"` only
-if your own source names a barista type directly — see *Services* below.
+That row is enough to `import github.com/beans-lang/espresso`; the binding is
+`espresso`, the name this manifest declares. [barista](https://github.com/beans-lang/barista)
+comes along with it transitively — add a row for it only if your own source
+names a barista type directly, and pin it at the same `v0.1.1` espresso does
+or the build refuses the two refs. See *Services* below.
 
 ## Controllers
 
@@ -171,8 +170,8 @@ with no match answers 404; a path that matches but not the method answers
 
 The container is [barista](https://github.com/beans-lang/barista), its own
 package. Espresso requires it, so an application that uses espresso gets it;
-name a barista type in your own source and add `require path` for it as
-well.
+name a barista type in your own source and add its own `require` row too, at
+the ref espresso pins.
 
 Registration is generic and typed; lifetimes are transient, scoped and
 singleton. `resolve` is a method on any provider or scope.

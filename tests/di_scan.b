@@ -10,7 +10,7 @@
 // this suite runs on both backends.
 package main
 
-import barista
+import github.com/beans-lang/barista
 import espresso
 import std.io
 

@@ -1,8 +1,8 @@
-// Every public API the README shows, compiled and run from another
-// package. A README line that does not compile fails here.
+// Every public API the README shows, compiled and run from another package.
+// Only the import differs: a consumer writes the git path, this is in-repo.
 package main
 
-import barista
+import github.com/beans-lang/barista
 import espresso
 import std.encoding.json
 import std.http

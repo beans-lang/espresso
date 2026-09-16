@@ -16,7 +16,7 @@
 //   {{.}}           the current scalar inside an array section
 package espresso
 
-import barista
+import github.com/beans-lang/barista
 
 import std.encoding.json
 import std.reflect

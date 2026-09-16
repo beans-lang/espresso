@@ -8,7 +8,7 @@
 // cannot: it refuses `@service` on a `@controller`.
 package espresso
 
-import barista
+import github.com/beans-lang/barista
 import std.reflect
 
 /// Registers every linked `@barista.service` class into this builder.
