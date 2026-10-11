@@ -335,7 +335,7 @@ pub class CountingSink implements espresso.PartSink {
     pub fn write(data: Bytes) -> Result<bool> {
         for index: int in 0..data.len() {
             self.bytes += 1
-            self.sum = (self.sum * 31 + data.get(index)) % 1000003
+            self.sum = (self.sum * 31 + data.get_u8(index)) % 1000003
         }
         return ok(true)
     }

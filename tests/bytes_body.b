@@ -82,7 +82,7 @@ fn bytes_equal(left: Bytes, right: Bytes) -> bool {
     if left.len() != right.len() { return false }
     var i: int = 0
     for i < left.len() {
-        if left.get(i) != right.get(i) { return false }
+        if left.get_u8(i) != right.get_u8(i) { return false }
         i += 1
     }
     return true
@@ -96,8 +96,8 @@ fn head_end(resp: Bytes) -> int {
     var i: int = 0
     let n: int = resp.len()
     for i + 4 <= n {
-        if resp.get(i) == 13 && resp.get(i + 1) == 10 &&
-           resp.get(i + 2) == 13 && resp.get(i + 3) == 10 {
+        if resp.get_u8(i) == 13 && resp.get_u8(i + 1) == 10 &&
+           resp.get_u8(i + 2) == 13 && resp.get_u8(i + 3) == 10 {
             return i
         }
         i += 1

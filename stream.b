@@ -26,7 +26,7 @@ fn append_hex(target: Bytes, value: int) {
     var index: int = digits.len()
     for index > 0 {
         index -= 1
-        target.push(digits.get(index))
+        target.push(digits.get_u8(index))
     }
 }
 

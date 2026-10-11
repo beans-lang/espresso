@@ -89,8 +89,8 @@ pub fn constant_time_equal(left: string, right: string) -> bool {
     let count: int = if a.len() > b.len() { a.len() } else { b.len() }
     var different: int = a.len() ^ b.len()
     for index: int in 0..count {
-        let x: int = if index < a.len() { a.get(index) } else { 0 }
-        let y: int = if index < b.len() { b.get(index) } else { 0 }
+        let x: int = if index < a.len() { a.get_u8(index) } else { 0 }
+        let y: int = if index < b.len() { b.get_u8(index) } else { 0 }
         different = different | (x ^ y)
     }
     return different == 0

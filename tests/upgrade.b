@@ -280,8 +280,8 @@ class Peer {
         match self.exactly(2) {
             none => { return "<no frame>" }
             some(header) => {
-                if header.get(0) != 129 { return "<opcode {header.get(0)}>" }
-                let length: int = header.get(1) % 128
+                if header.get_u8(0) != 129 { return "<opcode {header.get_u8(0)}>" }
+                let length: int = header.get_u8(1) % 128
                 if length >= 126 { return "<frame too long>" }
                 if length == 0 { return "" }
                 match self.exactly(length) {

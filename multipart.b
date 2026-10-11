@@ -392,7 +392,7 @@ pub class MultipartParser {
     fn classify_tail(after: int) -> int {
         var at: int = after
         for at < self.pending.len() {
-            let byte: int = self.pending.get(at)
+            let byte: int = self.pending.get_u8(at)
             if byte != 32 && byte != 9 { break }
             if at - after >= self.limits.max_boundary_padding_bytes {
                 self.tail_width = 0
@@ -404,8 +404,8 @@ pub class MultipartParser {
             self.tail_width = 0
             return tail_need_more()
         }
-        let first: int = self.pending.get(at)
-        let second: int = self.pending.get(at + 1)
+        let first: int = self.pending.get_u8(at)
+        let second: int = self.pending.get_u8(at + 1)
         self.tail_width = at + 2 - after
         if first == 45 && second == 45 { return tail_closing() }
         if first == 13 && second == 10 { return tail_next_part() }
@@ -660,7 +660,7 @@ fn storage_id() -> Result<string> {
     let raw: Bytes = random.bytes(16)?
     var out: string = ""
     for index: int in 0..raw.len() {
-        let byte: int = raw.get(index)
+        let byte: int = raw.get_u8(index)
         let high: int = byte / 16
         let low: int = byte % 16
         let digits: string = "0123456789abcdef"

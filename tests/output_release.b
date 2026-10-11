@@ -66,8 +66,8 @@ fn big(context: espresso.HttpContext) -> Result<espresso.ActionResult> {
 fn find_head_end(raw: Bytes, from: int) -> int {
     var at: int = if from < 0 { 0 } else { from }
     for at + 4 <= raw.len() {
-        if raw.get(at) == 13 && raw.get(at + 1) == 10 &&
-           raw.get(at + 2) == 13 && raw.get(at + 3) == 10 {
+        if raw.get_u8(at) == 13 && raw.get_u8(at + 1) == 10 &&
+           raw.get_u8(at + 2) == 13 && raw.get_u8(at + 3) == 10 {
             return at
         }
         at += 1
@@ -78,7 +78,7 @@ fn find_head_end(raw: Bytes, from: int) -> int {
 fn marked(raw: Bytes, at: int, mark: string) -> bool {
     var index: int = 0
     for index < mark.len() {
-        if raw.get(at + index) != mark.byte_at(index) { return false }
+        if raw.get_u8(at + index) != mark.byte_at(index) { return false }
         index += 1
     }
     return true

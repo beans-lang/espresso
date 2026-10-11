@@ -167,7 +167,7 @@ fn find_bytes(haystack: Bytes, needle: string, start: int) -> int {
         var j: int = 0
         var matched: bool = true
         for j < m {
-            if haystack.get(i + j) != needle.byte_at(j) {
+            if haystack.get_u8(i + j) != needle.byte_at(j) {
                 matched = false
                 break
             }
@@ -261,7 +261,7 @@ pub class ResponseHeadCache {
         // The placeholder length is exactly "0"; a real response's digits are
         // written in its place and the suffix follows it.
         let digits_at: int = cl_at + 16
-        if digits_at >= buf.len() || buf.get(digits_at) != 48 { return ok(false) }
+        if digits_at >= buf.len() || buf.get_u8(digits_at) != 48 { return ok(false) }
         let suffix_at: int = digits_at + 1
         let date_label_at: int = find_bytes(buf, "Date: ", suffix_at)
         if date_label_at < 0 { return ok(false) }
@@ -269,7 +269,7 @@ pub class ResponseHeadCache {
         // A fixed-width IMF-fixdate is 29 bytes and ends in CRLF; patching in
         // place is only safe if that is exactly what was produced.
         if date_val_at + 31 > buf.len() { return ok(false) }
-        if buf.get(date_val_at + 29) != 13 || buf.get(date_val_at + 30) != 10 {
+        if buf.get_u8(date_val_at + 29) != 13 || buf.get_u8(date_val_at + 30) != 10 {
             return ok(false)
         }
         self.prefix = buf.slice(0, digits_at)

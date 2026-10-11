@@ -84,8 +84,8 @@ fn head_end_of(resp: Bytes) -> int {
     var i: int = 0
     let n: int = resp.len()
     for i + 4 <= n {
-        if resp.get(i) == 13 && resp.get(i + 1) == 10 &&
-           resp.get(i + 2) == 13 && resp.get(i + 3) == 10 {
+        if resp.get_u8(i) == 13 && resp.get_u8(i + 1) == 10 &&
+           resp.get_u8(i + 2) == 13 && resp.get_u8(i + 3) == 10 {
             return i
         }
         i += 1
